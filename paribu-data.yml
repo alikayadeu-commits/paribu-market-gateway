@@ -1,0 +1,77 @@
+name: Paribu Market Data
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "5 * * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-paribu:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch Paribu data
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p data
+
+          fetched_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+          for market in virtual_tl fet_tl kite_tl; do
+            ticker="$(curl -fsS --retry 3 \
+              "https://api.paribu.com/market/ticker?market=${market}")"
+
+            orderbook="$(curl -fsS --retry 3 \
+              "https://api.paribu.com/orderbook?market=${market}&depth=20")"
+
+            jq -n \
+              --arg market "$market" \
+              --arg fetched_at "$fetched_at" \
+              --argjson ticker "$ticker" \
+              --argjson orderbook "$orderbook" \
+              '{
+                market: $market,
+                fetched_at: $fetched_at,
+                ticker: $ticker,
+                orderbook: $orderbook
+              }' \
+              > "data/${market}.json"
+          done
+
+          jq -n \
+            --arg fetched_at "$fetched_at" \
+            --slurpfile virtual data/virtual_tl.json \
+            --slurpfile fet data/fet_tl.json \
+            --slurpfile kite data/kite_tl.json \
+            '{
+              ok: true,
+              fetched_at: $fetched_at,
+              markets: {
+                virtual_tl: $virtual[0],
+                fet_tl: $fet[0],
+                kite_tl: $kite[0]
+              }
+            }' > data/latest.json
+
+      - name: Commit data
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update Paribu market data"
+            git push
+          fi
