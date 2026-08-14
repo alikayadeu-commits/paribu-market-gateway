@@ -2,9 +2,13 @@ name: Paribu Market Data
 
 on:
   workflow_dispatch:
-  
+
 permissions:
   contents: write
+
+concurrency:
+  group: paribu-market-data
+  cancel-in-progress: false
 
 jobs:
   fetch-paribu:
@@ -19,9 +23,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p data
+          mkdir -p data history
 
           fetched_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          history_date="$(date -u +"%Y-%m-%d")"
 
           for market in virtual_tl fet_tl kite_tl; do
             ticker="$(curl -fsS --retry 3 \
@@ -59,6 +64,33 @@ jobs:
               }
             }' > data/latest.json
 
+          jq -c \
+            --arg fetched_at "$fetched_at" \
+            '{
+              fetched_at: $fetched_at,
+              markets: {
+                virtual_tl: {
+                  last: .markets.virtual_tl.ticker[0].last,
+                  high: .markets.virtual_tl.ticker[0].high,
+                  low: .markets.virtual_tl.ticker[0].low,
+                  volume: .markets.virtual_tl.ticker[0].volume
+                },
+                fet_tl: {
+                  last: .markets.fet_tl.ticker[0].last,
+                  high: .markets.fet_tl.ticker[0].high,
+                  low: .markets.fet_tl.ticker[0].low,
+                  volume: .markets.fet_tl.ticker[0].volume
+                },
+                kite_tl: {
+                  last: .markets.kite_tl.ticker[0].last,
+                  high: .markets.kite_tl.ticker[0].high,
+                  low: .markets.kite_tl.ticker[0].low,
+                  volume: .markets.kite_tl.ticker[0].volume
+                }
+              }
+            }' data/latest.json \
+            >> "history/${history_date}.jsonl"
+
       - name: Commit data
         shell: bash
         run: |
@@ -67,7 +99,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add data/
+          git add data/ history/
 
           if git diff --cached --quiet; then
             echo "No changes to commit"
