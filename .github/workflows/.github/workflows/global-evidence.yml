@@ -1,0 +1,736 @@
+name: Global Evidence Layer
+
+on:
+  workflow_run:
+    workflows:
+      - "Adaptive Event Detector"
+    types:
+      - completed
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: global-evidence
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Collect and validate global evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p state
+
+          captured_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+          echo "========================================"
+          echo "GLOBAL EVIDENCE LAYER"
+          echo "========================================"
+          echo "Captured at: ${captured_at}"
+
+          # =========================================================
+          # BASIC HELPERS
+          # =========================================================
+
+          fetch_json() {
+            local url="$1"
+
+            curl -fsS \
+              --retry 3 \
+              --retry-delay 1 \
+              --connect-timeout 10 \
+              --max-time 20 \
+              "$url"
+          }
+
+          number_or_null() {
+            local value="$1"
+
+            if jq -e 'type == "number"' <<< "$value" >/dev/null 2>&1; then
+              printf '%s' "$value"
+              return
+            fi
+
+            if [[ "$value" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
+              printf '%s' "$value"
+            else
+              printf 'null'
+            fi
+          }
+
+          # =========================================================
+          # PARIBU HEALTH
+          # =========================================================
+
+          if [ ! -f data/latest.json ]; then
+            echo "ERROR: data/latest.json not found."
+            exit 1
+          fi
+
+          paribu_latest="$(cat data/latest.json)"
+
+          paribu_ok="$(jq -r '.ok // false' <<< "$paribu_latest")"
+          paribu_fetched_at="$(
+            jq -r '.fetched_at // empty' <<< "$paribu_latest"
+          )"
+
+          if [ "$paribu_ok" != "true" ]; then
+            echo "ERROR: Paribu snapshot is not healthy."
+            exit 1
+          fi
+
+          if [ -z "$paribu_fetched_at" ]; then
+            echo "ERROR: Paribu fetched_at is missing."
+            exit 1
+          fi
+
+          # =========================================================
+          # PARIBU FRESHNESS
+          # =========================================================
+
+          current_epoch="$(
+            date -u +%s
+          )"
+
+          paribu_epoch="$(
+            date -u -d "$paribu_fetched_at" +%s
+          )"
+
+          paribu_age_seconds=$(
+            (
+              current_epoch
+              - paribu_epoch
+            )
+          )
+
+          paribu_fresh="false"
+
+          if [ "$paribu_age_seconds" -le 45 ]; then
+            paribu_fresh="true"
+          elif [ "$paribu_age_seconds" -le 2700 ]; then
+            paribu_fresh="stale_warning"
+          fi
+
+          echo "Paribu snapshot: ${paribu_fetched_at}"
+          echo "Paribu age: ${paribu_age_seconds}s"
+          echo "Paribu freshness: ${paribu_fresh}"
+
+          # =========================================================
+          # FETCH BINANCE
+          # =========================================================
+
+          binance_virtual='{}'
+          binance_fet='{}'
+          binance_kite='{}'
+          binance_btc='{}'
+
+          binance_virtual_status="unavailable"
+          binance_fet_status="unavailable"
+          binance_kite_status="unavailable"
+          binance_btc_status="unavailable"
+
+          if binance_virtual="$(
+            fetch_json \
+            "https://api.binance.com/api/v3/ticker/24hr?symbol=VIRTUALUSDT"
+          )"; then
+            binance_virtual_status="available"
+          fi
+
+          if binance_fet="$(
+            fetch_json \
+            "https://api.binance.com/api/v3/ticker/24hr?symbol=FETUSDT"
+          )"; then
+            binance_fet_status="available"
+          fi
+
+          if binance_kite="$(
+            fetch_json \
+            "https://api.binance.com/api/v3/ticker/24hr?symbol=KITEUSDT"
+          )"; then
+            binance_kite_status="available"
+          fi
+
+          if binance_btc="$(
+            fetch_json \
+            "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT"
+          )"; then
+            binance_btc_status="available"
+          fi
+
+          echo "Binance VIRTUAL: ${binance_virtual_status}"
+          echo "Binance FET: ${binance_fet_status}"
+          echo "Binance KITE: ${binance_kite_status}"
+          echo "Binance BTC: ${binance_btc_status}"
+
+          # =========================================================
+          # FETCH OKX
+          # =========================================================
+
+          okx_virtual='{}'
+          okx_fet='{}'
+          okx_kite='{}'
+          okx_btc='{}'
+
+          okx_virtual_status="unavailable"
+          okx_fet_status="unavailable"
+          okx_kite_status="unavailable"
+          okx_btc_status="unavailable"
+
+          if okx_virtual="$(
+            fetch_json \
+            "https://www.okx.com/api/v5/market/ticker?instId=VIRTUAL-USDT"
+          )"; then
+            okx_virtual_status="available"
+          fi
+
+          if okx_fet="$(
+            fetch_json \
+            "https://www.okx.com/api/v5/market/ticker?instId=FET-USDT"
+          )"; then
+            okx_fet_status="available"
+          fi
+
+          if okx_kite="$(
+            fetch_json \
+            "https://www.okx.com/api/v5/market/ticker?instId=KITE-USDT"
+          )"; then
+            okx_kite_status="available"
+          fi
+
+          if okx_btc="$(
+            fetch_json \
+            "https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT"
+          )"; then
+            okx_btc_status="available"
+          fi
+
+          echo "OKX VIRTUAL: ${okx_virtual_status}"
+          echo "OKX FET: ${okx_fet_status}"
+          echo "OKX KITE: ${okx_kite_status}"
+          echo "OKX BTC: ${okx_btc_status}"
+
+          # =========================================================
+          # NORMALIZE BINANCE
+          # =========================================================
+
+          normalize_binance() {
+            local raw="$1"
+
+            jq -c '
+              if
+                (.symbol // null) == null
+                or (.lastPrice // null) == null
+              then
+                {
+                  available: false,
+                  symbol: null,
+                  price: null,
+                  change_24h_pct: null,
+                  volume_24h: null,
+                  quote_volume_24h: null
+                }
+              else
+                {
+                  available: true,
+                  symbol: .symbol,
+                  price: (.lastPrice | tonumber),
+                  change_24h_pct: (.priceChangePercent | tonumber),
+                  volume_24h: (.volume | tonumber),
+                  quote_volume_24h: (.quoteVolume | tonumber)
+                }
+              end
+            ' <<< "$raw"
+          }
+
+          # =========================================================
+          # NORMALIZE OKX
+          # =========================================================
+
+          normalize_okx() {
+            local raw="$1"
+
+            jq -c '
+              if
+                (.code // "1") != "0"
+                or (($raw.data // []) | length) == 0
+                or ($raw.data[0].last // null) == null
+              then
+                {
+                  available: false,
+                  symbol: null,
+                  price: null,
+                  change_24h_pct: null,
+                  volume_24h: null,
+                  quote_volume_24h: null,
+                  timestamp_ms: null
+                }
+              else
+                $raw.data[0] as $d |
+                {
+                  available: true,
+                  symbol: ($d.instId // null),
+                  price: (($d.last // "0") | tonumber),
+
+                  change_24h_pct:
+                    if ($d.open24h // "") != ""
+                    then
+                      (
+                        (
+                          (($d.last | tonumber)
+                          -
+                          ($d.open24h | tonumber))
+                          /
+                          ($d.open24h | tonumber)
+                        ) * 100
+                      )
+                    else
+                      null
+                    end,
+
+                  volume_24h:
+                    if ($d.vol24h // "") != ""
+                    then ($d.vol24h | tonumber)
+                    else null
+                    end,
+
+                  quote_volume_24h: null,
+
+                  timestamp_ms:
+                    if ($d.ts // "") != ""
+                    then ($d.ts | tonumber)
+                    else null
+                    end
+                }
+              end
+            ' --argjson raw "$raw" <<< "$raw"
+          }
+
+          bv="$(normalize_binance "$binance_virtual")"
+          bf="$(normalize_binance "$binance_fet")"
+          bk="$(normalize_binance "$binance_kite")"
+          bb="$(normalize_binance "$binance_btc")"
+
+          ov="$(normalize_okx "$okx_virtual")"
+          of="$(normalize_okx "$okx_fet")"
+          ok="$(normalize_okx "$okx_kite")"
+          ob="$(normalize_okx "$okx_btc")"
+
+          # =========================================================
+          # LOCAL PARIBU VALUES
+          # =========================================================
+
+          paribu_virtual_price="$(
+            jq -r '
+              .markets.virtual_tl.ticker[0].last
+              // null
+            ' <<< "$paribu_latest"
+          )"
+
+          paribu_fet_price="$(
+            jq -r '
+              .markets.fet_tl.ticker[0].last
+              // null
+            ' <<< "$paribu_latest"
+          )"
+
+          paribu_kite_price="$(
+            jq -r '
+              .markets.kite_tl.ticker[0].last
+              // null
+            ' <<< "$paribu_latest"
+          )"
+
+          paribu_virtual_volume="$(
+            jq -r '
+              .markets.virtual_tl.ticker[0].volume
+              // null
+            ' <<< "$paribu_latest"
+          )"
+
+          paribu_fet_volume="$(
+            jq -r '
+              .markets.fet_tl.ticker[0].volume
+              // null
+            ' <<< "$paribu_latest"
+          )"
+
+          paribu_kite_volume="$(
+            jq -r '
+              .markets.kite_tl.ticker[0].volume
+              // null
+            ' <<< "$paribu_latest"
+          )"
+
+          # =========================================================
+          # BUILD EVIDENCE
+          # =========================================================
+
+          jq -n \
+            --arg captured_at "$captured_at" \
+            --arg paribu_fetched_at "$paribu_fetched_at" \
+            --arg paribu_fresh "$paribu_fresh" \
+            --argjson paribu_age "$paribu_age_seconds" \
+            --argjson paribu "$paribu_latest" \
+            --argjson bv "$bv" \
+            --argjson bf "$bf" \
+            --argjson bk "$bk" \
+            --argjson bb "$bb" \
+            --argjson ov "$ov" \
+            --argjson of "$of" \
+            --argjson ok "$ok" \
+            --argjson ob "$ob" \
+            --arg bv_status "$binance_virtual_status" \
+            --arg bf_status "$binance_fet_status" \
+            --arg bk_status "$binance_kite_status" \
+            --arg bb_status "$binance_btc_status" \
+            --arg ov_status "$okx_virtual_status" \
+            --arg of_status "$okx_fet_status" \
+            --arg ok_status "$okx_kite_status" \
+            --arg ob_status "$okx_btc_status" \
+            --argjson pv "$paribu_virtual_price" \
+            --argjson pf "$paribu_fet_price" \
+            --argjson pk "$paribu_kite_price" \
+            --argjson pvv "$paribu_virtual_volume" \
+            --argjson pfv "$paribu_fet_volume" \
+            --argjson pkv "$paribu_kite_volume" \
+            '
+            def valid_price($x):
+              ($x.available == true)
+              and ($x.price != null)
+              and ($x.price > 0);
+
+            def direction($change):
+              if $change == null then
+                "unknown"
+              elif $change > 0.25 then
+                "up"
+              elif $change < -0.25 then
+                "down"
+              else
+                "flat"
+              end;
+
+            def cross_exchange_agreement($a; $b):
+              if
+                (valid_price($a) and valid_price($b))
+              then
+                (
+                  ($a.change_24h_pct - $b.change_24h_pct)
+                  | abs
+                ) <= 1.0
+              else
+                false
+              end;
+
+            def global_direction($a; $b):
+              if
+                ($a.change_24h_pct != null
+                 and $b.change_24h_pct != null)
+              then
+                if
+                  ($a.change_24h_pct > 0.25
+                   and $b.change_24h_pct > 0.25)
+                then
+                  "up"
+                elif
+                  ($a.change_24h_pct < -0.25
+                   and $b.change_24h_pct < -0.25)
+                then
+                  "down"
+                else
+                  "mixed"
+                end
+              elif
+                ($a.change_24h_pct != null)
+              then
+                direction(
+                  $a.change_24h_pct
+                )
+              elif
+                ($b.change_24h_pct != null)
+              then
+                direction(
+                  $b.change_24h_pct
+                )
+              else
+                "unknown"
+              end;
+
+            def confidence(
+              $binance_available;
+              $okx_available;
+              $agreement;
+              $global_direction_value;
+              $btc_available
+            ):
+
+              if
+                $binance_available
+                and $okx_available
+                and $agreement
+                and $global_direction_value != "mixed"
+                and $global_direction_value != "unknown"
+                and $btc_available
+              then
+                "HIGH"
+
+              elif
+                (
+                  $binance_available
+                  or $okx_available
+                )
+                and $global_direction_value != "unknown"
+              then
+                "MEDIUM"
+
+              else
+                "LOW"
+
+              end;
+
+            {
+              captured_at: $captured_at,
+
+              source_health: {
+                paribu: {
+                  available: true,
+                  fetched_at: $paribu_fetched_at,
+                  age_seconds: $paribu_age,
+                  freshness: $paribu_fresh
+                },
+
+                binance: {
+                  VIRTUAL: $bv_status,
+                  FET: $bf_status,
+                  KITE: $bk_status,
+                  BTC: $bb_status
+                },
+
+                okx: {
+                  VIRTUAL: $ov_status,
+                  FET: $of_status,
+                  KITE: $ok_status,
+                  BTC: $ob_status
+                }
+              },
+
+              benchmarks: {
+                BTC: {
+                  binance: $bb,
+                  okx: $ob
+                }
+              },
+
+              coins: {
+
+                VIRTUAL: {
+
+                  local: {
+                    exchange: "Paribu",
+                    quote_currency: "TRY",
+                    price: $pv,
+                    volume_24h: $pvv
+                  },
+
+                  global: {
+                    binance: $bv,
+                    okx: $ov
+                  },
+
+                  relationship: {
+                    global_direction:
+                      global_direction(
+                        $bv;
+                        $ov
+                      ),
+
+                    cross_exchange_agreement:
+                      cross_exchange_agreement(
+                        $bv;
+                        $ov
+                      ),
+
+                    global_confidence:
+                      confidence(
+                        ($bv.available == true);
+                        ($ov.available == true);
+                        cross_exchange_agreement(
+                          $bv;
+                          $ov
+                        );
+                        global_direction(
+                          $bv;
+                          $ov
+                        );
+                        ($bb.available == true
+                         or $ob.available == true)
+                      )
+                  }
+                },
+
+                FET: {
+
+                  local: {
+                    exchange: "Paribu",
+                    quote_currency: "TRY",
+                    price: $pf,
+                    volume_24h: $pfv
+                  },
+
+                  global: {
+                    binance: $bf,
+                    okx: $of
+                  },
+
+                  relationship: {
+                    global_direction:
+                      global_direction(
+                        $bf;
+                        $of
+                      ),
+
+                    cross_exchange_agreement:
+                      cross_exchange_agreement(
+                        $bf;
+                        $of
+                      ),
+
+                    global_confidence:
+                      confidence(
+                        ($bf.available == true);
+                        ($of.available == true);
+                        cross_exchange_agreement(
+                          $bf;
+                          $of
+                        );
+                        global_direction(
+                          $bf;
+                          $of
+                        );
+                        ($bb.available == true
+                         or $ob.available == true)
+                      )
+                  }
+                },
+
+                KITE: {
+
+                  local: {
+                    exchange: "Paribu",
+                    quote_currency: "TRY",
+                    price: $pk,
+                    volume_24h: $pkv
+                  },
+
+                  global: {
+                    binance: $bk,
+                    okx: $ok
+                  },
+
+                  relationship: {
+                    global_direction:
+                      global_direction(
+                        $bk;
+                        $ok
+                      ),
+
+                    cross_exchange_agreement:
+                      cross_exchange_agreement(
+                        $bk;
+                        $ok
+                      ),
+
+                    global_confidence:
+                      confidence(
+                        ($bk.available == true);
+                        ($ok.available == true);
+                        cross_exchange_agreement(
+                          $bk;
+                          $ok
+                        );
+                        global_direction(
+                          $bk;
+                          $ok
+                        );
+                        ($bb.available == true
+                         or $ob.available == true)
+                      )
+                  }
+                }
+              },
+
+              methodology: {
+                price_comparison:
+                  "Local TRY price is not directly compared with global USDT price.",
+
+                global_comparison:
+                  "Global direction and return behaviour are compared across Binance and OKX.",
+
+                benchmark:
+                  "BTC/USDT is used as a broad crypto benchmark.",
+
+                missing_data:
+                  "Unavailable data is not treated as negative evidence.",
+
+                confidence:
+                  "Confidence reflects source availability, cross-exchange agreement, directional clarity and benchmark availability.",
+
+                decision:
+                  "This layer does not make buy, hold or sell decisions."
+              }
+            }
+            ' > state/global_evidence.json
+
+          # =========================================================
+          # BASIC VALIDATION
+          # =========================================================
+
+          jq empty state/global_evidence.json
+
+          echo ""
+          echo "========================================"
+          echo "GLOBAL EVIDENCE SUMMARY"
+          echo "========================================"
+
+          jq '{
+            captured_at,
+            source_health,
+            coins: {
+              VIRTUAL: .coins.VIRTUAL.relationship,
+              FET: .coins.FET.relationship,
+              KITE: .coins.KITE.relationship
+            }
+          }' state/global_evidence.json
+
+      - name: Commit global evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add state/global_evidence.json
+
+          if git diff --cached --quiet; then
+            echo "No global evidence changes."
+            exit 0
+          fi
+
+          git commit -m "Add validated global evidence layer"
+
+          git push origin HEAD:main
