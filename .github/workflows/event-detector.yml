@@ -6,6 +6,7 @@ on:
       - "Paribu Market Data"
     types:
       - completed
+
   workflow_dispatch:
 
 permissions:
@@ -34,6 +35,10 @@ jobs:
           from pathlib import Path
           from datetime import datetime, timezone
 
+          # =========================================================
+          # CONFIGURATION
+          # =========================================================
+
           COINS = {
               "VIRTUAL": "virtual_tl",
               "FET": "fet_tl",
@@ -45,16 +50,30 @@ jobs:
           events_path = Path("state/events.jsonl")
           lifecycle_path = Path("state/lifecycle.json")
 
-          latest = json.loads(latest_path.read_text())
+          # =========================================================
+          # LOAD CURRENT SNAPSHOT
+          # =========================================================
+
+          latest = json.loads(
+              latest_path.read_text(
+                  encoding="utf-8"
+              )
+          )
 
           if latest.get("ok") is not True:
-              print("Invalid Paribu snapshot. Nothing to detect.")
+              print(
+                  "Invalid Paribu snapshot. "
+                  "Nothing to detect."
+              )
               raise SystemExit(0)
 
           fetched_at = latest.get("fetched_at")
 
           if not fetched_at:
-              print("Missing fetched_at. Nothing to detect.")
+              print(
+                  "Missing fetched_at. "
+                  "Nothing to detect."
+              )
               raise SystemExit(0)
 
           fetched_dt = datetime.fromisoformat(
@@ -62,49 +81,113 @@ jobs:
           )
 
           now = datetime.now(timezone.utc)
-          age_seconds = (now - fetched_dt).total_seconds()
+
+          age_seconds = (
+              now - fetched_dt
+          ).total_seconds()
+
+          # ---------------------------------------------------------
+          # Reject impossible future snapshots.
+          # ---------------------------------------------------------
 
           if age_seconds < -300:
-              print("Future-dated snapshot. Nothing to detect.")
-              raise SystemExit(0)
-
-          if age_seconds > 45 * 60:
               print(
-                  f"Stale Paribu snapshot: {age_seconds:.0f}s. "
+                  "Future-dated snapshot. "
                   "Nothing to detect."
               )
               raise SystemExit(0)
 
           # ---------------------------------------------------------
-          # LOAD HISTORICAL SNAPSHOTS
+          # Reject stale snapshots.
           # ---------------------------------------------------------
+
+          if age_seconds > 45 * 60:
+              print(
+                  f"Stale Paribu snapshot: "
+                  f"{age_seconds:.0f}s. "
+                  "Nothing to detect."
+              )
+              raise SystemExit(0)
+
+          print(
+              f"Current snapshot: {fetched_at}"
+          )
+
+          print(
+              f"Snapshot age: "
+              f"{age_seconds:.0f}s"
+          )
+
+          # =========================================================
+          # LOAD HISTORICAL SNAPSHOTS
+          # =========================================================
 
           snapshots = []
 
-          for path in sorted(history_dir.glob("*.jsonl")):
-              for line in path.read_text().splitlines():
-                  if not line.strip():
-                      continue
+          if history_dir.exists():
 
-                  try:
-                      snapshots.append(json.loads(line))
-                  except json.JSONDecodeError:
-                      continue
+              for path in sorted(
+                  history_dir.glob("*.jsonl")
+              ):
+
+                  for line in path.read_text(
+                      encoding="utf-8"
+                  ).splitlines():
+
+                      if not line.strip():
+                          continue
+
+                      try:
+                          snapshot = json.loads(line)
+                          snapshots.append(snapshot)
+
+                      except json.JSONDecodeError:
+                          continue
 
           snapshots.sort(
-              key=lambda x: x.get("fetched_at", "")
+              key=lambda x: x.get(
+                  "fetched_at",
+                  ""
+              )
           )
 
-          # ---------------------------------------------------------
-          # LOAD EXISTING EVENTS FOR IDEMPOTENCY
+          # =========================================================
+          # IMPORTANT
           #
-          # The same snapshot must never generate the same event
-          # twice, even if the workflow is manually re-run.
-          # ---------------------------------------------------------
+          # The current latest.json snapshot can already exist in
+          # history because Paribu Market Data writes history and
+          # latest.json in the same workflow.
+          #
+          # Therefore the current fetched_at MUST be excluded from
+          # historical comparison.
+          # =========================================================
+
+          historical_snapshots = [
+              snapshot
+              for snapshot in snapshots
+              if snapshot.get(
+                  "fetched_at"
+              ) != fetched_at
+          ]
+
+          print(
+              "Historical snapshots available: "
+              f"{len(historical_snapshots)}"
+          )
+
+          # =========================================================
+          # LOAD EXISTING EVENTS
+          #
+          # Used for idempotency.
+          #
+          # Same snapshot + same coin + same event must never be
+          # written twice.
+          # =========================================================
 
           existing_event_keys = set()
 
           if events_path.exists():
+
               for line in events_path.read_text(
                   encoding="utf-8"
               ).splitlines():
@@ -126,115 +209,224 @@ jobs:
                   except json.JSONDecodeError:
                       continue
 
-          # ---------------------------------------------------------
+          print(
+              "Existing event keys: "
+              f"{len(existing_event_keys)}"
+          )
+
+          # =========================================================
           # HELPERS
-          # ---------------------------------------------------------
+          # =========================================================
 
           def number(value):
               try:
                   return float(value)
-              except (TypeError, ValueError):
+
+              except (
+                  TypeError,
+                  ValueError
+              ):
                   return None
+
 
           def current_market(market):
-              return latest.get("markets", {}).get(market)
+              return latest.get(
+                  "markets",
+                  {}
+              ).get(market)
+
 
           def current_price(market):
+
               data = current_market(market)
 
               try:
-                  return number(data["ticker"][0]["last"])
-              except (KeyError, TypeError, IndexError):
+                  return number(
+                      data["ticker"][0]["last"]
+                  )
+
+              except (
+                  KeyError,
+                  TypeError,
+                  IndexError
+              ):
                   return None
+
 
           def current_volume(market):
+
               data = current_market(market)
 
               try:
-                  return number(data["ticker"][0]["volume"])
-              except (KeyError, TypeError, IndexError):
+                  return number(
+                      data["ticker"][0]["volume"]
+                  )
+
+              except (
+                  KeyError,
+                  TypeError,
+                  IndexError
+              ):
                   return None
 
+
           def current_orderbook_pressure(market):
+
               data = current_market(market)
 
               try:
-                  bids = data["orderbook"]["bids"]
-                  asks = data["orderbook"]["asks"]
+
+                  bids = data[
+                      "orderbook"
+                  ]["bids"]
+
+                  asks = data[
+                      "orderbook"
+                  ]["asks"]
 
                   bid_value = 0.0
                   ask_value = 0.0
 
                   for item in bids:
-                      price = number(item[0])
-                      quantity = number(item[1])
 
-                      if price is not None and quantity is not None:
-                          bid_value += price * quantity
+                      price = number(
+                          item[0]
+                      )
+
+                      quantity = number(
+                          item[1]
+                      )
+
+                      if (
+                          price is not None
+                          and quantity is not None
+                      ):
+                          bid_value += (
+                              price * quantity
+                          )
 
                   for item in asks:
-                      price = number(item[0])
-                      quantity = number(item[1])
 
-                      if price is not None and quantity is not None:
-                          ask_value += price * quantity
+                      price = number(
+                          item[0]
+                      )
 
-                  total = bid_value + ask_value
+                      quantity = number(
+                          item[1]
+                      )
+
+                      if (
+                          price is not None
+                          and quantity is not None
+                      ):
+                          ask_value += (
+                              price * quantity
+                          )
+
+                  total = (
+                      bid_value
+                      + ask_value
+                  )
 
                   if total <= 0:
                       return "unknown"
 
-                  ratio = bid_value / total
+                  bid_ratio = (
+                      bid_value / total
+                  )
 
-                  if ratio >= 0.60:
+                  if bid_ratio >= 0.60:
                       return "demand_heavy"
 
-                  if ratio <= 0.40:
+                  if bid_ratio <= 0.40:
                       return "supply_heavy"
 
                   return "balanced"
 
-              except (KeyError, TypeError, IndexError):
+              except (
+                  KeyError,
+                  TypeError,
+                  IndexError
+              ):
                   return "unknown"
 
-          def historical_coin_snapshots(market):
+
+          def historical_coin_snapshots(
+              market
+          ):
+
               result = []
 
-              for snapshot in snapshots:
+              for snapshot in historical_snapshots:
+
                   try:
+
+                      market_data = snapshot[
+                          "markets"
+                      ][market]
+
                       result.append(
-                          snapshot["markets"][market]
+                          market_data
                       )
-                  except KeyError:
+
+                  except (
+                      KeyError,
+                      TypeError
+                  ):
                       continue
 
               return result
 
-          # ---------------------------------------------------------
+          # =========================================================
           # EVENT DETECTOR
           #
-          # IMPORTANT:
+          # IMPORTANT ARCHITECTURE:
           #
-          # EVENT != STATE
-          # EVENT != DECISION
-          # EVENT != PUSH
+          # EVENT  != STATE
+          # EVENT  != DECISION
+          # EVENT  != PUSH
           #
-          # This layer only identifies meaningful market behaviour.
-          # ---------------------------------------------------------
+          # This layer only detects meaningful market behaviour.
+          # The Decision Engine will later decide whether an event
+          # deserves an action/push.
+          # =========================================================
 
-          def detect_event(coin, market):
+          def detect_event(
+              coin,
+              market
+          ):
 
-              price = current_price(market)
-              volume = current_volume(market)
-              pressure = current_orderbook_pressure(market)
+              price = current_price(
+                  market
+              )
+
+              volume = current_volume(
+                  market
+              )
+
+              pressure = (
+                  current_orderbook_pressure(
+                      market
+                  )
+              )
 
               if price is None:
                   return None
 
-              hist = historical_coin_snapshots(market)
+              hist = (
+                  historical_coin_snapshots(
+                      market
+                  )
+              )
+
+              # -----------------------------------------------------
+              # No previous observation.
+              # -----------------------------------------------------
 
               if not hist:
+
                   return {
+                      "coin": coin,
                       "event": "INITIAL_OBSERVATION",
                       "decision_relevant": False,
                       "global_validation_required": False,
@@ -242,57 +434,107 @@ jobs:
                       "change_from_previous_snapshot": None,
                       "volume_change": None,
                       "orderbook_pressure": pressure,
-                      "reason": "İlk kullanılabilir gözlem.",
+                      "reason": (
+                          "İlk kullanılabilir "
+                          "gözlem."
+                      ),
                   }
+
+              # -----------------------------------------------------
+              # Previous snapshot.
+              #
+              # Because current fetched_at was explicitly excluded
+              # above, this is genuinely the previous observation.
+              # -----------------------------------------------------
 
               last = hist[-1]
 
-              previous_price = number(last.get("last"))
-              previous_volume = number(last.get("volume"))
+              previous_price = number(
+                  last.get("last")
+              )
 
-              if previous_price in (None, 0):
+              previous_volume = number(
+                  last.get("volume")
+              )
+
+              if (
+                  previous_price is None
+                  or previous_price == 0
+              ):
                   return None
 
+              # =====================================================
+              # PRICE CHANGE
+              # =====================================================
+
               price_change = (
-                  (price - previous_price)
+                  (
+                      price
+                      - previous_price
+                  )
                   / previous_price
                   * 100
               )
 
+              # =====================================================
+              # VOLUME CHANGE
+              # =====================================================
+
               volume_change = None
 
               if (
-                  previous_volume not in (None, 0)
+                  previous_volume is not None
+                  and previous_volume != 0
                   and volume is not None
               ):
+
                   volume_change = (
-                      (volume - previous_volume)
-                      / abs(previous_volume)
+                      (
+                          volume
+                          - previous_volume
+                      )
+                      / abs(
+                          previous_volume
+                      )
                       * 100
                   )
 
-              # -----------------------------------------------------
+              # =====================================================
               # RECENT STRUCTURE
-              # -----------------------------------------------------
+              #
+              # Use previous observations only.
+              # =====================================================
 
               recent = hist[-8:]
 
               recent_prices = [
-                  number(x.get("last"))
+                  number(
+                      x.get("last")
+                  )
                   for x in recent
-                  if number(x.get("last")) is not None
+                  if number(
+                      x.get("last")
+                  ) is not None
               ]
 
               recent_highs = [
-                  number(x.get("high"))
+                  number(
+                      x.get("high")
+                  )
                   for x in recent
-                  if number(x.get("high")) is not None
+                  if number(
+                      x.get("high")
+                  ) is not None
               ]
 
               recent_lows = [
-                  number(x.get("low"))
+                  number(
+                      x.get("low")
+                  )
                   for x in recent
-                  if number(x.get("low")) is not None
+                  if number(
+                      x.get("low")
+                  ) is not None
               ]
 
               if not recent_prices:
@@ -310,108 +552,136 @@ jobs:
                   else None
               )
 
-              earlier_price = (
-                  recent_prices[0]
-                  if len(recent_prices) >= 2
-                  else previous_price
-              )
+              # -----------------------------------------------------
+              # Direction over recent observations.
+              # -----------------------------------------------------
+
+              if len(recent_prices) >= 2:
+
+                  earlier_price = (
+                      recent_prices[0]
+                  )
+
+              else:
+
+                  earlier_price = (
+                      previous_price
+                  )
 
               recent_move = (
-                  (price - earlier_price)
+                  (
+                      price
+                      - earlier_price
+                  )
                   / earlier_price
                   * 100
               )
 
-              # -----------------------------------------------------
+              # =====================================================
               # EVENT CLASSIFICATION
-              # -----------------------------------------------------
+              # =====================================================
 
               event = None
               reason = None
+
               decision_relevant = False
+
               global_required = False
 
-              # Structural expansion.
+              # =====================================================
+              # 1. STRUCTURAL EXPANSION UP
               #
-              # This is the ONLY event that can directly describe
-              # structural expansion.
-              #
-              # Reversal or orderbook pressure cannot promote the
-              # lifecycle into EXPANSION.
-              # -----------------------------------------------------
+              # This is a structural event.
+              # =====================================================
 
               if (
                   recent_high is not None
                   and price > recent_high
                   and recent_move > 0
               ):
+
                   event = "EXPANSION_UP"
 
                   reason = (
-                      "Fiyat yakın tarihsel yapının üzerine "
-                      "çıkarak yukarı yönlü yapısal genişleme "
-                      "gösteriyor."
+                      "Fiyat önceki gözlem "
+                      "yapısının üzerine çıkarak "
+                      "yukarı yönlü yapısal "
+                      "genişleme gösteriyor."
                   )
 
                   decision_relevant = True
                   global_required = True
+
+              # =====================================================
+              # 2. STRUCTURAL EXPANSION DOWN
+              # =====================================================
 
               elif (
                   recent_low is not None
                   and price < recent_low
                   and recent_move < 0
               ):
+
                   event = "EXPANSION_DOWN"
 
                   reason = (
-                      "Fiyat yakın tarihsel yapının altına "
-                      "çıkarak aşağı yönlü yapısal genişleme "
-                      "gösteriyor."
+                      "Fiyat önceki gözlem "
+                      "yapısının altına çıkarak "
+                      "aşağı yönlü yapısal "
+                      "genişleme gösteriyor."
                   )
 
                   decision_relevant = True
                   global_required = True
 
-              # -----------------------------------------------------
-              # REVERSAL
+              # =====================================================
+              # 3. REVERSAL UP
               #
-              # Reversal is a decision event.
-              # It is NOT automatically an expansion state.
-              # -----------------------------------------------------
+              # Reversal is NOT expansion.
+              # =====================================================
 
               elif (
                   price_change > 0
                   and recent_move < 0
               ):
+
                   event = "REVERSAL_UP"
 
                   reason = (
-                      "Önceki zayıflık sonrasında fiyat "
-                      "yönü yukarı dönüyor."
+                      "Önceki zayıflık sonrasında "
+                      "fiyat yönü yukarı dönüyor."
                   )
 
                   decision_relevant = True
                   global_required = True
+
+              # =====================================================
+              # 4. REVERSAL DOWN
+              #
+              # Reversal is NOT expansion.
+              # =====================================================
 
               elif (
                   price_change < 0
                   and recent_move > 0
               ):
+
                   event = "REVERSAL_DOWN"
 
                   reason = (
-                      "Önceki güçlenme sonrasında fiyat "
-                      "yönü aşağı dönüyor."
+                      "Önceki güçlenme sonrasında "
+                      "fiyat yönü aşağı dönüyor."
                   )
 
                   decision_relevant = True
                   global_required = True
 
-              # -----------------------------------------------------
-              # PARTICIPATION
+              # =====================================================
+              # 5. PARTICIPATION EXPANSION
               #
-              # Participation is evidence, not a lifecycle state.
-              # -----------------------------------------------------
+              # Evidence event.
+              # Does NOT change lifecycle by itself.
+              # =====================================================
 
               elif (
                   volume_change is not None
@@ -420,7 +690,10 @@ jobs:
               ):
 
                   if price_change > 0:
-                      event = "PARTICIPATION_EXPANSION_UP"
+
+                      event = (
+                          "PARTICIPATION_EXPANSION_UP"
+                      )
 
                       reason = (
                           "Fiyat hareketine belirgin "
@@ -428,22 +701,26 @@ jobs:
                       )
 
                   else:
-                      event = "PARTICIPATION_EXPANSION_DOWN"
+
+                      event = (
+                          "PARTICIPATION_EXPANSION_DOWN"
+                      )
 
                       reason = (
-                          "Aşağı yönlü fiyat hareketine "
-                          "belirgin katılım artışı eşlik ediyor."
+                          "Aşağı yönlü fiyat "
+                          "hareketine belirgin "
+                          "katılım artışı eşlik ediyor."
                       )
 
                   decision_relevant = True
                   global_required = True
 
-              # -----------------------------------------------------
-              # ORDERBOOK PRESSURE
+              # =====================================================
+              # 6. DEMAND SUPPORT
               #
-              # Pressure alone does NOT change lifecycle.
-              # It is evidence for the Decision Engine.
-              # -----------------------------------------------------
+              # Evidence event.
+              # Does NOT change lifecycle.
+              # =====================================================
 
               elif (
                   pressure == "demand_heavy"
@@ -453,12 +730,20 @@ jobs:
                   event = "DEMAND_SUPPORT"
 
                   reason = (
-                      "Pozitif fiyat hareketi sırasında "
-                      "görünür alış likiditesi baskın."
+                      "Pozitif fiyat hareketi "
+                      "sırasında görünür alış "
+                      "likiditesi baskın."
                   )
 
                   decision_relevant = True
                   global_required = True
+
+              # =====================================================
+              # 7. SUPPLY PRESSURE
+              #
+              # Evidence event.
+              # Does NOT change lifecycle.
+              # =====================================================
 
               elif (
                   pressure == "supply_heavy"
@@ -468,56 +753,93 @@ jobs:
                   event = "SUPPLY_PRESSURE"
 
                   reason = (
-                      "Negatif fiyat hareketi sırasında "
-                      "görünür satış likiditesi baskın."
+                      "Negatif fiyat hareketi "
+                      "sırasında görünür satış "
+                      "likiditesi baskın."
                   )
 
                   decision_relevant = True
                   global_required = True
 
+              # =====================================================
+              # 8. NOTHING MEANINGFUL
+              # =====================================================
+
               else:
+
                   return None
 
               return {
                   "coin": coin,
                   "event": event,
-                  "decision_relevant": decision_relevant,
-                  "global_validation_required": global_required,
+                  "decision_relevant": (
+                      decision_relevant
+                  ),
+                  "global_validation_required": (
+                      global_required
+                  ),
                   "price": price,
-                  "change_from_previous_snapshot": price_change,
-                  "volume_change": volume_change,
-                  "orderbook_pressure": pressure,
+                  "change_from_previous_snapshot": (
+                      price_change
+                  ),
+                  "volume_change": (
+                      volume_change
+                  ),
+                  "orderbook_pressure": (
+                      pressure
+                  ),
                   "reason": reason,
               }
 
-          # ---------------------------------------------------------
-          # LIFECYCLE
-          #
-          # Only structural/reversal events can change lifecycle.
-          # Evidence events such as SUPPLY_PRESSURE and
-          # DEMAND_SUPPORT do NOT automatically change state.
-          # ---------------------------------------------------------
+          # =========================================================
+          # LOAD LIFECYCLE STATE
+          # =========================================================
 
           if lifecycle_path.exists():
+
               lifecycle = json.loads(
                   lifecycle_path.read_text(
                       encoding="utf-8"
                   )
               )
+
           else:
+
               lifecycle = {}
 
           events_to_write = []
 
+          # =========================================================
+          # PROCESS EACH COIN
+          # =========================================================
+
           for coin, market in COINS.items():
 
-              detected = detect_event(coin, market)
+              detected = detect_event(
+                  coin,
+                  market
+              )
+
+              # -----------------------------------------------------
+              # No meaningful event.
+              # -----------------------------------------------------
 
               if not detected:
-                  print(f"{coin}: no meaningful event")
+
+                  print(
+                      f"{coin}: "
+                      "no meaningful event"
+                  )
+
                   continue
 
-              event_name = detected["event"]
+              event_name = detected[
+                  "event"
+              ]
+
+              # =====================================================
+              # IDEMPOTENCY KEY
+              # =====================================================
 
               event_key = (
                   fetched_at,
@@ -525,103 +847,207 @@ jobs:
                   event_name,
               )
 
-              # -----------------------------------------------------
-              # IDEMPOTENCY
-              # -----------------------------------------------------
-
               if event_key in existing_event_keys:
+
                   print(
-                      f"{coin}: duplicate snapshot/event "
-                      f"ignored ({event_name})"
+                      f"{coin}: duplicate "
+                      f"snapshot/event ignored "
+                      f"({event_name})"
                   )
+
                   continue
 
-              detected_at = datetime.now(
-                  timezone.utc
-              ).isoformat()
+              # =====================================================
+              # CURRENT LIFECYCLE STATE
+              # =====================================================
 
-              previous_state = lifecycle.get(
+              coin_state = lifecycle.get(
                   coin,
                   {}
-              ).get(
+              )
+
+              previous_state = coin_state.get(
                   "state",
                   "UNKNOWN"
               )
 
-              # -----------------------------------------------------
-              # STATE TRANSITION
-              # -----------------------------------------------------
-
               current_state = previous_state
 
+              detected_at = (
+                  datetime.now(
+                      timezone.utc
+                  ).isoformat()
+              )
+
+              # =====================================================
+              # STATE TRANSITIONS
+              #
+              # ONLY structural/reversal events may change the
+              # lifecycle state.
+              #
+              # Evidence events do not change the state.
+              # =====================================================
+
               if event_name == "EXPANSION_UP":
-                  current_state = "EXPANSION_UP"
+
+                  current_state = (
+                      "EXPANSION_UP"
+                  )
 
               elif event_name == "EXPANSION_DOWN":
-                  current_state = "EXPANSION_DOWN"
+
+                  current_state = (
+                      "EXPANSION_DOWN"
+                  )
 
               elif event_name == "REVERSAL_UP":
-                  current_state = "REVERSAL_UP"
+
+                  current_state = (
+                      "REVERSAL_UP"
+                  )
 
               elif event_name == "REVERSAL_DOWN":
-                  current_state = "REVERSAL_DOWN"
 
-              elif event_name == "PARTICIPATION_EXPANSION_UP":
-                  current_state = previous_state
-
-              elif event_name == "PARTICIPATION_EXPANSION_DOWN":
-                  current_state = previous_state
-
-              elif event_name == "DEMAND_SUPPORT":
-                  current_state = previous_state
-
-              elif event_name == "SUPPLY_PRESSURE":
-                  current_state = previous_state
+                  current_state = (
+                      "REVERSAL_DOWN"
+                  )
 
               # -----------------------------------------------------
+              # Evidence events:
+              #
+              # DEMAND_SUPPORT
+              # SUPPLY_PRESSURE
+              # PARTICIPATION_*
+              #
+              # These DO NOT change lifecycle state.
+              # -----------------------------------------------------
+
+              else:
+
+                  current_state = (
+                      previous_state
+                  )
+
+              # =====================================================
               # UPDATE LIFECYCLE
+              # =====================================================
+
+              existing_coin_state = lifecycle.get(
+                  coin,
+                  {}
+              )
+
+              lifecycle_entry = dict(
+                  existing_coin_state
+              )
+
+              lifecycle_entry[
+                  "state"
+              ] = current_state
+
+              # -----------------------------------------------------
+              # Structural/reversal events are lifecycle events.
               # -----------------------------------------------------
 
-              lifecycle[coin] = {
-                  "state": current_state,
-                  "last_event": event_name,
-                  "updated_at": detected_at,
-              }
+              if event_name in {
+                  "EXPANSION_UP",
+                  "EXPANSION_DOWN",
+                  "REVERSAL_UP",
+                  "REVERSAL_DOWN",
+              }:
 
-              events_to_write.append({
+                  lifecycle_entry[
+                      "last_event"
+                  ] = event_name
+
+                  lifecycle_entry[
+                      "updated_at"
+                  ] = detected_at
+
+              # -----------------------------------------------------
+              # Evidence events are kept separately so they do not
+              # overwrite the lifecycle's structural event.
+              # -----------------------------------------------------
+
+              else:
+
+                  lifecycle_entry[
+                      "last_evidence_event"
+                  ] = event_name
+
+                  lifecycle_entry[
+                      "last_evidence_at"
+                  ] = detected_at
+
+              lifecycle[coin] = (
+                  lifecycle_entry
+              )
+
+              # =====================================================
+              # EVENT RECORD
+              #
+              # No push_candidate.
+              # Decision Engine will consume this later.
+              # =====================================================
+
+              event_record = {
                   "detected_at": detected_at,
                   "fetched_at": fetched_at,
                   "coin": coin,
                   "event": event_name,
-                  "previous_state": previous_state,
-                  "current_state": current_state,
-                  "decision_relevant": detected[
-                      "decision_relevant"
+                  "previous_state": (
+                      previous_state
+                  ),
+                  "current_state": (
+                      current_state
+                  ),
+                  "decision_relevant": (
+                      detected[
+                          "decision_relevant"
+                      ]
+                  ),
+                  "global_validation_required": (
+                      detected[
+                          "global_validation_required"
+                      ]
+                  ),
+                  "price": detected[
+                      "price"
                   ],
-                  "global_validation_required": detected[
-                      "global_validation_required"
+                  "change_from_previous_snapshot": (
+                      detected[
+                          "change_from_previous_snapshot"
+                      ]
+                  ),
+                  "volume_change": (
+                      detected[
+                          "volume_change"
+                      ]
+                  ),
+                  "orderbook_pressure": (
+                      detected[
+                          "orderbook_pressure"
+                      ]
+                  ),
+                  "reason": detected[
+                      "reason"
                   ],
-                  "price": detected["price"],
-                  "change_from_previous_snapshot": detected[
-                      "change_from_previous_snapshot"
-                  ],
-                  "volume_change": detected[
-                      "volume_change"
-                  ],
-                  "orderbook_pressure": detected[
-                      "orderbook_pressure"
-                  ],
-                  "reason": detected["reason"],
-              })
+              }
 
-              print(
-                  f"{coin}: {event_name} | "
-                  f"{previous_state} -> {current_state}"
+              events_to_write.append(
+                  event_record
               )
 
-          # ---------------------------------------------------------
+              print(
+                  f"{coin}: "
+                  f"{event_name} | "
+                  f"{previous_state} -> "
+                  f"{current_state}"
+              )
+
+          # =========================================================
           # WRITE EVENTS
-          # ---------------------------------------------------------
+          # =========================================================
 
           if events_to_write:
 
@@ -636,6 +1062,7 @@ jobs:
               ) as f:
 
                   for event in events_to_write:
+
                       f.write(
                           json.dumps(
                               event,
@@ -644,9 +1071,20 @@ jobs:
                           + "\n"
                       )
 
-          # ---------------------------------------------------------
+              print(
+                  f"Events written: "
+                  f"{len(events_to_write)}"
+              )
+
+          else:
+
+              print(
+                  "No new events to write."
+              )
+
+          # =========================================================
           # WRITE LIFECYCLE
-          # ---------------------------------------------------------
+          # =========================================================
 
           lifecycle_path.parent.mkdir(
               parents=True,
@@ -663,11 +1101,37 @@ jobs:
               encoding="utf-8"
           )
 
-          print("--------------------------------")
-          print("Adaptive Event Detector complete")
-          print(f"Snapshot: {fetched_at}")
-          print(f"Age: {age_seconds:.0f}s")
-          print("--------------------------------")
+          print(
+              "Lifecycle state updated."
+          )
+
+          # =========================================================
+          # COMPLETE
+          # =========================================================
+
+          print(
+              "--------------------------------"
+          )
+
+          print(
+              "Adaptive Event Detector complete"
+          )
+
+          print(
+              f"Snapshot: {fetched_at}"
+          )
+
+          print(
+              f"Age: {age_seconds:.0f}s"
+          )
+
+          print(
+              "--------------------------------"
+          )
+
+      # =============================================================
+      # COMMIT DETECTOR STATE
+      # =============================================================
 
       - name: Commit detector state
         shell: bash
@@ -684,5 +1148,6 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Separate event and lifecycle state"
+          git commit -m "Fix current snapshot exclusion"
+
           git push origin HEAD:main
