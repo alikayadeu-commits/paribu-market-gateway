@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  decide:
+  evidence:
     if: >
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
@@ -28,12 +28,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Run decision engine
+      - name: Build local evidence snapshot
         shell: python
         run: |
           import json
           from pathlib import Path
-          from datetime import datetime, timezone, timedelta
+          from datetime import datetime, timezone
 
           COINS = {
               "VIRTUAL": "virtual_tl",
@@ -43,16 +43,17 @@ jobs:
           }
 
           latest_path = Path("data/latest.json")
-          history_dir = Path("history")
           lifecycle_path = Path("state/lifecycle.json")
           events_path = Path("state/events.jsonl")
-          decision_path = Path("state/decision.json")
+          output_path = Path("state/decision.json")
 
-          # Rolling calibration report produced by:
-          # .github/workflows/rolling-calibration-backtest.yml
-          calibration_path = Path(
-              "state/rolling_calibration_backtest.json"
-          )
+          # =========================================================
+          # LOAD PARIBU SNAPSHOT
+          # =========================================================
+
+          if not latest_path.exists():
+              print("Paribu snapshot unavailable.")
+              raise SystemExit(0)
 
           latest = json.loads(
               latest_path.read_text(
@@ -60,262 +61,55 @@ jobs:
               )
           )
 
-          lifecycle = (
-              json.loads(
-                  lifecycle_path.read_text(
-                      encoding="utf-8"
-                  )
-              )
-              if lifecycle_path.exists()
-              else {}
-          )
-
-          decisions = (
-              json.loads(
-                  decision_path.read_text(
-                      encoding="utf-8"
-                  )
-              )
-              if decision_path.exists()
-              else {}
-          )
-
-          # =========================================================
-          # ROLLING CALIBRATION STATUS
-          #
-          # IMPORTANT:
-          # At this stage calibration is informational only.
-          # It does NOT modify the existing decision rules.
-          #
-          # Once the minimum history requirement is reached,
-          # the calibration layer becomes ACTIVE and can be
-          # connected to decision scoring in the next stage.
-          # =========================================================
-
-          calibration = {}
-
-          if calibration_path.exists():
-
-              try:
-                  calibration = json.loads(
-                      calibration_path.read_text(
-                          encoding="utf-8"
-                      )
-                  )
-
-              except (
-                  OSError,
-                  json.JSONDecodeError
-              ):
-                  calibration = {}
-
-          calibration_activation = (
-              calibration.get(
-                  "activation",
-                  {}
-              )
-          )
-
-          calibration_active = bool(
-              calibration_activation.get(
-                  "active",
-                  False
-              )
-          )
-
-          calibration_history_days = (
-              calibration_activation.get(
-                  "available_history_days"
-              )
-          )
-
-          if calibration_active:
-
-              print(
-                  "Rolling calibration: ACTIVE"
-              )
-
-          else:
-
-              print(
-                  "Rolling calibration: INACTIVE"
-              )
-
-          if calibration_history_days is not None:
-
-              try:
-
-                  print(
-                      "Calibration history:",
-                      f"{float(calibration_history_days):.2f} days"
-                  )
-
-              except (
-                  TypeError,
-                  ValueError
-              ):
-
-                  print(
-                      "Calibration history:",
-                      calibration_history_days
-                  )
-
-          if not calibration_active:
-
-              print(
-                  "Rolling calibration is not yet "
-                  "allowed to modify decisions."
-              )
-
-          # =========================================================
-          # DATA HEALTH
-          # =========================================================
-
           if latest.get("ok") is not True:
-
-              print(
-                  "Paribu data invalid. No decision."
-              )
-
+              print("Paribu data invalid.")
               raise SystemExit(0)
 
-          fetched_at = latest.get(
-              "fetched_at"
-          )
+          fetched_at = latest.get("fetched_at")
 
           if not fetched_at:
-
-              print(
-                  "Missing fetched_at. No decision."
-              )
-
+              print("Missing fetched_at.")
               raise SystemExit(0)
 
           fetched_dt = datetime.fromisoformat(
-              fetched_at.replace(
-                  "Z",
-                  "+00:00"
-              )
+              fetched_at.replace("Z", "+00:00")
           )
 
-          now = datetime.now(
-              timezone.utc
-          )
+          now = datetime.now(timezone.utc)
 
           age_seconds = (
               now - fetched_dt
           ).total_seconds()
 
           if age_seconds < -300:
-
-              print(
-                  "Future-dated snapshot. No decision."
-              )
-
+              print("Future-dated snapshot.")
               raise SystemExit(0)
 
-          # Established Paribu safety gate.
           if age_seconds > 45 * 60:
-
               print(
                   f"Stale Paribu data: "
-                  f"{age_seconds:.0f}s. "
-                  f"No decision."
+                  f"{age_seconds:.0f}s."
               )
-
               raise SystemExit(0)
 
-          print()
-          print(
-              "========================================"
-          )
-          print(
-              "ADAPTIVE DECISION ENGINE"
-          )
-          print(
-              "========================================"
-          )
-          print(
-              f"Snapshot: {fetched_at}"
-          )
-          print(
-              f"Snapshot age: {age_seconds:.0f}s"
-          )
-          print(
-              "Rolling calibration:",
-              "ACTIVE"
-              if calibration_active
-              else "INACTIVE"
-          )
-          print()
-
           # =========================================================
-          # LOAD HISTORY
+          # LOAD LIFECYCLE
           # =========================================================
 
-          snapshots = []
+          lifecycle = {}
 
-          if history_dir.exists():
-
-              for path in sorted(
-                  history_dir.glob(
-                      "*.jsonl"
-                  )
-              ):
-
-                  try:
-
-                      for line in path.read_text(
+          if lifecycle_path.exists():
+              try:
+                  lifecycle = json.loads(
+                      lifecycle_path.read_text(
                           encoding="utf-8"
-                      ).splitlines():
-
-                          if not line.strip():
-                              continue
-
-                          try:
-                              snapshot = json.loads(
-                                  line
-                              )
-
-                          except json.JSONDecodeError:
-                              continue
-
-                          snapshot_time = (
-                              snapshot.get(
-                                  "fetched_at"
-                              )
-                          )
-
-                          if not snapshot_time:
-                              continue
-
-                          snapshots.append(
-                              snapshot
-                          )
-
-                  except OSError:
-
-                      continue
-
-          snapshots.sort(
-              key=lambda x: x.get(
-                  "fetched_at",
-                  ""
-              )
-          )
-
-          historical_snapshots = [
-              snapshot
-              for snapshot in snapshots
-              if snapshot.get(
-                  "fetched_at"
-              ) != fetched_at
-          ]
-
-          print(
-              "Historical snapshots:",
-              len(historical_snapshots)
-          )
+                      )
+                  )
+              except (
+                  OSError,
+                  json.JSONDecodeError
+              ):
+                  lifecycle = {}
 
           # =========================================================
           # LOAD EVENTS
@@ -333,22 +127,17 @@ jobs:
                       continue
 
                   try:
-
                       events.append(
                           json.loads(line)
                       )
-
                   except json.JSONDecodeError:
-
                       continue
 
           latest_events = {}
 
           for event in events:
 
-              coin = event.get(
-                  "coin"
-              )
+              coin = event.get("coin")
 
               if coin not in COINS:
                   continue
@@ -358,10 +147,9 @@ jobs:
               )
 
               if (
-                  event_time is not None
+                  event_time
                   and event_time <= fetched_at
               ):
-
                   latest_events[coin] = event
 
           # =========================================================
@@ -372,30 +160,6 @@ jobs:
 
               try:
                   return float(value)
-
-              except (
-                  TypeError,
-                  ValueError
-              ):
-
-                  return None
-
-
-          def parse_time(value):
-
-              if not value:
-                  return None
-
-              try:
-
-                  return datetime.fromisoformat(
-                      value.replace(
-                          "Z",
-                          "+00:00"
-                      )
-                  ).astimezone(
-                      timezone.utc
-                  )
 
               except (
                   TypeError,
@@ -417,16 +181,11 @@ jobs:
 
           def current_price(market):
 
-              data = market_data(
-                  market
-              )
+              data = market_data(market)
 
               try:
-
                   return number(
-                      data[
-                          "ticker"
-                      ][0]["last"]
+                      data["ticker"][0]["last"]
                   )
 
               except (
@@ -434,22 +193,16 @@ jobs:
                   TypeError,
                   IndexError
               ):
-
                   return None
 
 
           def current_volume(market):
 
-              data = market_data(
-                  market
-              )
+              data = market_data(market)
 
               try:
-
                   return number(
-                      data[
-                          "ticker"
-                      ][0]["volume"]
+                      data["ticker"][0]["volume"]
                   )
 
               except (
@@ -457,67 +210,45 @@ jobs:
                   TypeError,
                   IndexError
               ):
-
                   return None
 
 
           def orderbook_pressure(market):
 
-              data = market_data(
-                  market
-              )
+              data = market_data(market)
 
               try:
 
-                  bids = data[
-                      "orderbook"
-                  ]["bids"]
-
-                  asks = data[
-                      "orderbook"
-                  ]["asks"]
+                  bids = data["orderbook"]["bids"]
+                  asks = data["orderbook"]["asks"]
 
                   bid_volume = 0.0
                   ask_volume = 0.0
 
                   for item in bids:
 
-                      price = number(
-                          item[0]
-                      )
-
-                      quantity = number(
-                          item[1]
-                      )
+                      price = number(item[0])
+                      quantity = number(item[1])
 
                       if (
                           price is not None
                           and quantity is not None
                       ):
-
                           bid_volume += (
-                              price
-                              * quantity
+                              price * quantity
                           )
 
                   for item in asks:
 
-                      price = number(
-                          item[0]
-                      )
-
-                      quantity = number(
-                          item[1]
-                      )
+                      price = number(item[0])
+                      quantity = number(item[1])
 
                       if (
                           price is not None
                           and quantity is not None
                       ):
-
                           ask_volume += (
-                              price
-                              * quantity
+                              price * quantity
                           )
 
                   total = (
@@ -529,8 +260,7 @@ jobs:
                       return "unknown"
 
                   ratio = (
-                      bid_volume
-                      / total
+                      bid_volume / total
                   )
 
                   if ratio >= 0.60:
@@ -547,389 +277,39 @@ jobs:
                   IndexError,
                   ValueError
               ):
-
                   return "unknown"
 
-
-          def historical_market_snapshots(
-              market
-          ):
-
-              result = []
-
-              for snapshot in historical_snapshots:
-
-                  try:
-
-                      market_item = snapshot[
-                          "markets"
-                      ][market]
-
-                      timestamp = snapshot.get(
-                          "fetched_at"
-                      )
-
-                      price = number(
-                          market_item.get(
-                              "last"
-                          )
-                      )
-
-                      if (
-                          timestamp
-                          and price is not None
-                      ):
-
-                          result.append({
-                              "timestamp": timestamp,
-                              "price": price,
-                          })
-
-                  except (
-                      KeyError,
-                      TypeError
-                  ):
-
-                      continue
-
-              return result
-
-
-          def nearest_price_before(
-              market_history,
-              target_dt,
-              tolerance_seconds
-          ):
-
-              best = None
-              best_gap = None
-
-              for item in market_history:
-
-                  dt = parse_time(
-                      item[
-                          "timestamp"
-                      ]
-                  )
-
-                  if dt is None:
-                      continue
-
-                  if dt > target_dt:
-                      continue
-
-                  gap = (
-                      target_dt - dt
-                  ).total_seconds()
-
-                  if (
-                      gap
-                      > tolerance_seconds
-                  ):
-                      continue
-
-                  if (
-                      best_gap is None
-                      or gap < best_gap
-                  ):
-
-                      best = item
-                      best_gap = gap
-
-              return best
-
-
-          def direction(value):
-
-              if value is None:
-                  return "UNKNOWN"
-
-              if value > 0:
-                  return "UP"
-
-              if value < 0:
-                  return "DOWN"
-
-              return "FLAT"
-
-
-          def price_direction(
-              current,
-              previous
-          ):
-
-              if (
-                  current is None
-                  or previous is None
-                  or previous == 0
-              ):
-
-                  return "UNKNOWN"
-
-              change = (
-                  (
-                      current
-                      - previous
-                  )
-                  / previous
-              )
-
-              return direction(
-                  change
-              )
-
-
           # =========================================================
-          # REVERSAL PERSISTENCE
-          #
-          # 1 snapshot:
-          #   REVERSAL_CANDIDATE
-          #
-          # 2 consecutive snapshots (~30m):
-          #   REVERSAL_CONFIRMED
-          #
-          # 30m + 1h same direction:
-          #   REVERSAL_STRONG
-          #
-          # 30m confirmed but 1h opposite:
-          #   REVERSAL_EARLY
+          # LOCAL EVIDENCE
           # =========================================================
 
-          def reversal_status(
-              market,
-              current_price_value,
-              event_name
-          ):
+          output = {
+              "generated_at": datetime.now(
+                  timezone.utc
+              ).isoformat(),
 
-              if event_name not in {
-                  "momentum_reversal_up",
-                  "momentum_reversal_down",
-                  "REVERSAL_UP",
-                  "REVERSAL_DOWN",
-                  "reversal_up",
-                  "reversal_down",
-              }:
+              "snapshot_at": fetched_at,
 
-                  return None
+              "mode": "LOCAL_EVIDENCE_ONLY",
 
-              if event_name.lower().endswith(
-                  "reversal_up"
-              ):
+              "decision_authority": (
+                  "EXTERNAL_DECISION_SUPPORT_ENGINE"
+              ),
 
-                  reversal_direction = "UP"
-
-              else:
-
-                  reversal_direction = "DOWN"
-
-              history = (
-                  historical_market_snapshots(
-                      market
-                  )
-              )
-
-              if not history:
-
-                  return {
-                      "status": (
-                          "REVERSAL_CANDIDATE"
-                      ),
-                      "direction": (
-                          reversal_direction
-                      ),
-                      "one_hour_direction": (
-                          "UNKNOWN"
-                      ),
-                      "confirmed": False,
-                      "strong": False,
-                  }
-
-              history = sorted(
-                  history,
-                  key=lambda x: x[
-                      "timestamp"
-                  ]
-              )
-
-              previous = history[-1]
-
-              previous_direction = (
-                  price_direction(
-                      current_price_value,
-                      previous["price"]
-                  )
-              )
-
-              if (
-                  previous_direction
-                  != reversal_direction
-              ):
-
-                  return {
-                      "status": (
-                          "REVERSAL_CANDIDATE"
-                      ),
-                      "direction": (
-                          reversal_direction
-                      ),
-                      "one_hour_direction": (
-                          "UNKNOWN"
-                      ),
-                      "confirmed": False,
-                      "strong": False,
-                  }
-
-              previous_previous = (
-                  history[-2]
-                  if len(history) >= 2
-                  else None
-              )
-
-              if previous_previous is None:
-
-                  return {
-                      "status": (
-                          "REVERSAL_CANDIDATE"
-                      ),
-                      "direction": (
-                          reversal_direction
-                      ),
-                      "one_hour_direction": (
-                          "UNKNOWN"
-                      ),
-                      "confirmed": False,
-                      "strong": False,
-                  }
-
-              prior_direction = (
-                  price_direction(
-                      previous["price"],
-                      previous_previous[
-                          "price"
-                      ]
-                  )
-              )
-
-              if (
-                  prior_direction
-                  != reversal_direction
-              ):
-
-                  return {
-                      "status": (
-                          "REVERSAL_CANDIDATE"
-                      ),
-                      "direction": (
-                          reversal_direction
-                      ),
-                      "one_hour_direction": (
-                          "UNKNOWN"
-                      ),
-                      "confirmed": False,
-                      "strong": False,
-                  }
-
-              current_dt = fetched_dt
-
-              one_hour_target = (
-                  current_dt
-                  - timedelta(
-                      hours=1
-                  )
-              )
-
-              one_hour_reference = (
-                  nearest_price_before(
-                      history,
-                      one_hour_target,
-                      20 * 60
-                  )
-              )
-
-              if one_hour_reference is None:
-
-                  return {
-                      "status": (
-                          "REVERSAL_CONFIRMED"
-                      ),
-                      "direction": (
-                          reversal_direction
-                      ),
-                      "one_hour_direction": (
-                          "UNKNOWN"
-                      ),
-                      "confirmed": True,
-                      "strong": False,
-                  }
-
-              one_hour_direction = (
-                  price_direction(
-                      current_price_value,
-                      one_hour_reference[
-                          "price"
-                      ]
-                  )
-              )
-
-              if (
-                  one_hour_direction
-                  == reversal_direction
-              ):
-
-                  return {
-                      "status": (
-                          "REVERSAL_STRONG"
-                      ),
-                      "direction": (
-                          reversal_direction
-                      ),
-                      "one_hour_direction": (
-                          one_hour_direction
-                      ),
-                      "confirmed": True,
-                      "strong": True,
-                  }
-
-              return {
-                  "status": (
-                      "REVERSAL_EARLY"
-                  ),
-                  "direction": (
-                      reversal_direction
-                  ),
-                  "one_hour_direction": (
-                      one_hour_direction
-                  ),
-                  "confirmed": True,
-                  "strong": False,
-              }
-
-
-          # =========================================================
-          # DECISION ENGINE
-          #
-          # IMPORTANT:
-          # Rolling calibration is currently a GATE only.
-          # It does not yet change the existing decisions.
-          # =========================================================
-
-          now_iso = datetime.now(
-              timezone.utc
-          ).isoformat()
+              "coins": {}
+          }
 
           for coin, market in COINS.items():
 
-              market_item = market_data(
-                  market
+              event = latest_events.get(
+                  coin,
+                  {}
               )
 
-              if not market_item:
-
-                  print(
-                      f"{coin}: market data unavailable"
-                  )
-
-                  continue
+              lifecycle_item = lifecycle.get(
+                  coin,
+                  {}
+              )
 
               price = current_price(
                   market
@@ -943,423 +323,120 @@ jobs:
                   market
               )
 
-              if price is None:
+              output["coins"][coin] = {
 
-                  print(
-                      f"{coin}: invalid price"
-                  )
-
-                  continue
-
-              event = latest_events.get(
-                  coin
-              )
-
-              event_name = (
-                  event.get(
-                      "event"
-                  )
-                  if event
-                  else None
-              )
-
-              lifecycle_state = (
-                  lifecycle.get(
-                      coin,
-                      {}
-                  ).get(
-                      "state",
-                      "UNKNOWN"
-                  )
-              )
-
-              previous_decision = (
-                  decisions.get(
-                      coin,
-                      {}
-                  )
-              )
-
-              decision = "NONE"
-
-              reason = (
-                  "Yeni anlamlı event bulunmadı."
-              )
-
-              lifecycle_signal = None
-
-              # =====================================================
-              # REVERSAL GATE
-              # =====================================================
-
-              if event_name in {
-                  "momentum_reversal_up",
-                  "momentum_reversal_down",
-                  "REVERSAL_UP",
-                  "REVERSAL_DOWN",
-                  "reversal_up",
-                  "reversal_down",
-              }:
-
-                  lifecycle_signal = (
-                      reversal_status(
-                          market,
-                          price,
-                          event_name
-                      )
-                  )
-
-                  status = (
-                      lifecycle_signal[
-                          "status"
-                      ]
-                  )
-
-                  direction_value = (
-                      lifecycle_signal[
-                          "direction"
-                      ]
-                  )
-
-                  if status == (
-                      "REVERSAL_CANDIDATE"
-                  ):
-
-                      decision = "WAIT"
-
-                      reason = (
-                          "Reversal adayı oluştu "
-                          "ancak 30 dakikalık "
-                          "persistence teyidi "
-                          "henüz yok."
-                      )
-
-                  elif status == (
-                      "REVERSAL_EARLY"
-                  ):
-
-                      decision = "WAIT"
-
-                      reason = (
-                          "Reversal 30 dakika teyitli "
-                          "ancak 1 saatlik yön henüz "
-                          "aynı yönde değil."
-                      )
-
-                  elif status == (
-                      "REVERSAL_CONFIRMED"
-                  ):
-
-                      decision = "WAIT"
-
-                      reason = (
-                          "Reversal 30 dakika teyitli; "
-                          "ancak 1 saatlik yön teyidi yok."
-                      )
-
-                  elif status == (
-                      "REVERSAL_STRONG"
-                  ):
-
-                      if (
-                          direction_value == "DOWN"
-                          and pressure
-                          == "supply_heavy"
-                      ):
-
-                          decision = (
-                              "REDUCE_PROFIT"
-                          )
-
-                          reason = (
-                              "Reversal 30 dakika teyitli "
-                              "ve 1 saatlik yön de aşağı. "
-                              "Paribu order book arz baskısını "
-                              "destekliyor."
-                          )
-
-                      elif (
-                          direction_value == "UP"
-                          and pressure
-                          == "demand_heavy"
-                      ):
-
-                          decision = (
-                              "ADD_CONSIDER"
-                          )
-
-                          reason = (
-                              "Reversal 30 dakika teyitli "
-                              "ve 1 saatlik yön de yukarı. "
-                              "Paribu order book talep baskısını "
-                              "destekliyor."
-                          )
-
-                      else:
-
-                          decision = "WAIT"
-
-                          reason = (
-                              "Reversal güçlü teyitli ancak "
-                              "Paribu order book tarafında "
-                              "yeterli ek teyit yok."
-                          )
-
-              # =====================================================
-              # NON-REVERSAL EVENTS
-              # =====================================================
-
-              elif event_name in {
-                  "structural_expansion_up",
-                  "EXPANSION_UP",
-                  "expansion_up",
-              }:
-
-                  if (
-                      pressure
-                      == "demand_heavy"
-                  ):
-
-                      decision = (
-                          "ADD_CONSIDER"
-                      )
-
-                      reason = (
-                          "Yukarı yönlü yapısal "
-                          "genişleme ve görünür "
-                          "talep baskısı birlikte."
-                      )
-
-                  else:
-
-                      decision = "WAIT"
-
-                      reason = (
-                          "Yukarı yönlü yapısal "
-                          "genişleme var ancak "
-                          "Paribu talep teyidi "
-                          "yeterli değil."
-                      )
-
-              elif event_name in {
-                  "structural_expansion_down",
-                  "EXPANSION_DOWN",
-                  "expansion_down",
-              }:
-
-                  if (
-                      pressure
-                      == "supply_heavy"
-                  ):
-
-                      decision = (
-                          "REDUCE_PROFIT"
-                      )
-
-                      reason = (
-                          "Aşağı yönlü yapısal "
-                          "genişleme ve görünür "
-                          "arz baskısı birlikte."
-                      )
-
-                  else:
-
-                      decision = "WAIT"
-
-                      reason = (
-                          "Aşağı yönlü yapısal "
-                          "genişleme var ancak "
-                          "Paribu arz teyidi "
-                          "yeterli değil."
-                      )
-
-              elif event_name in {
-                  "PARTICIPATION_EXPANSION_UP",
-                  "participation_expansion_up",
-              }:
-
-                  decision = "WAIT"
-
-                  reason = (
-                      "Katılım artışı yukarı yönlü "
-                      "hareketi destekliyor ancak "
-                      "tek başına ek alım sinyali değil."
-                  )
-
-              elif event_name in {
-                  "PARTICIPATION_EXPANSION_DOWN",
-                  "participation_expansion_down",
-              }:
-
-                  decision = "WAIT"
-
-                  reason = (
-                      "Katılım artışı aşağı yönlü "
-                      "hareketi destekliyor ancak "
-                      "tek başına kâr realizasyonu "
-                      "sinyali değil."
-                  )
-
-              elif event_name in {
-                  "DEMAND_SUPPORT",
-                  "demand_support",
-              }:
-
-                  decision = "WAIT"
-
-                  reason = (
-                      "Talep desteği mevcut; "
-                      "tek başına işlem kararı üretmiyor."
-                  )
-
-              elif event_name in {
-                  "SUPPLY_PRESSURE",
-                  "supply_pressure",
-              }:
-
-                  decision = "WAIT"
-
-                  reason = (
-                      "Arz baskısı mevcut; "
-                      "tek başına işlem kararı üretmiyor."
-                  )
-
-              else:
-
-                  decision = "NONE"
-
-                  reason = (
-                      "Yeni anlamlı event bulunmadı."
-                  )
-
-              # =====================================================
-              # PUSH KEY
-              # =====================================================
-
-              lifecycle_key = (
-                  lifecycle_state
-              )
-
-              if lifecycle_signal is not None:
-
-                  lifecycle_key = (
-                      lifecycle_signal[
-                          "status"
-                      ]
-                  )
-
-              push_key = (
-                  f"{coin}|"
-                  f"{event_name}|"
-                  f"{lifecycle_key}|"
-                  f"{decision}"
-              )
-
-              previous_push_key = (
-                  previous_decision.get(
-                      "last_push_key"
-                  )
-              )
-
-              # =====================================================
-              # WRITE DECISION STATE
-              # =====================================================
-
-              decisions[coin] = {
-                  "decision": decision,
-                  "last_decision_at": now_iso,
-                  "last_event": event_name,
-                  "last_lifecycle_state": (
-                      lifecycle_key
-                  ),
-                  "last_push_key": (
-                      push_key
-                      if decision != "NONE"
-                      else previous_push_key
-                  ),
-                  "reason": reason,
                   "price": price,
+
                   "volume": volume,
+
                   "orderbook_pressure": pressure,
 
-                  # Global connector layer will populate
-                  # this in the next architecture stage.
-                  "global_status": (
-                      "NOT_CONNECTED_YET"
+                  "last_event": event.get(
+                      "event"
                   ),
 
-                  # Rolling calibration gate.
-                  # This is informational until the
-                  # calibration layer is explicitly
-                  # promoted into the scoring engine.
-                  "rolling_calibration": {
-                      "active": (
-                          calibration_active
-                      ),
-                      "history_days": (
-                          calibration_history_days
-                      ),
-                  },
+                  "event_detected_at": event.get(
+                      "detected_at"
+                  ),
+
+                  "event_fetched_at": event.get(
+                      "fetched_at"
+                  ),
+
+                  "event_previous_state": event.get(
+                      "previous_state"
+                  ),
+
+                  "event_current_state": event.get(
+                      "current_state"
+                  ),
+
+                  "event_reason": event.get(
+                      "reason"
+                  ),
+
+                  "lifecycle_state": lifecycle_item.get(
+                      "state",
+                      "UNKNOWN"
+                  ),
+
+                  "lifecycle_updated_at": (
+                      lifecycle_item.get(
+                          "updated_at"
+                      )
+                  ),
+
+                  "last_evidence_event": (
+                      lifecycle_item.get(
+                          "last_evidence_event"
+                      )
+                  ),
+
+                  "last_evidence_at": (
+                      lifecycle_item.get(
+                          "last_evidence_at"
+                      )
+                  ),
+
+                  # Explicitly prevent this layer
+                  # from pretending to make a trade decision.
+                  "decision": "DEFERRED",
+
+                  "decision_reason": (
+                      "Local evidence prepared. "
+                      "Final decision requires "
+                      "Paribu + Binance + OKX "
+                      "combined analysis."
+                  )
               }
-
-              # =====================================================
-              # LOG
-              # =====================================================
-
-              if decision == "NONE":
-
-                  print(
-                      f"{coin}: SILENT | "
-                      f"{reason}"
-                  )
-
-                  continue
-
-              if (
-                  push_key
-                  == previous_push_key
-              ):
-
-                  print(
-                      f"{coin}: SAME DECISION / "
-                      f"SILENT | {decision}"
-                  )
-
-                  continue
-
-              print(
-                  f"{coin}: NEW DECISION | "
-                  f"{decision} | "
-                  f"event={event_name} | "
-                  f"lifecycle={lifecycle_key} | "
-                  f"pressure={pressure}"
-              )
 
           # =========================================================
           # WRITE
           # =========================================================
 
-          decision_path.write_text(
+          output_path.parent.mkdir(
+              parents=True,
+              exist_ok=True
+          )
+
+          output_path.write_text(
               json.dumps(
-                  decisions,
+                  output,
                   indent=2,
                   ensure_ascii=False
               ) + "\n",
               encoding="utf-8"
           )
 
-          print()
-          print(
-              "========================================"
-          )
-          print(
-              "Decision state updated."
-          )
           print(
               "========================================"
           )
 
-      - name: Commit decision state
+          print(
+              "LOCAL EVIDENCE SNAPSHOT"
+          )
+
+          print(
+              "========================================"
+          )
+
+          for coin, item in output["coins"].items():
+
+              print(
+                  f"{coin}: "
+                  f"event={item['last_event']} | "
+                  f"lifecycle={item['lifecycle_state']} | "
+                  f"pressure={item['orderbook_pressure']} | "
+                  f"decision=DEFERRED"
+              )
+
+          print()
+          print(
+              "Final decision authority remains "
+              "outside GitHub."
+          )
+
+      - name: Commit local evidence
         shell: bash
         run: |
           set -euo pipefail
@@ -1370,9 +447,9 @@ jobs:
           git add state/decision.json
 
           if git diff --cached --quiet; then
-            echo "No decision-state changes."
+            echo "No local evidence changes."
             exit 0
           fi
 
-          git commit -m "Connect rolling calibration gate"
+          git commit -m "Update local evidence snapshot"
           git push origin HEAD:main
