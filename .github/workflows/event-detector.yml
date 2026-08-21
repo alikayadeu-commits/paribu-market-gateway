@@ -76,7 +76,7 @@ jobs:
               raise SystemExit(0)
 
           # ---------------------------------------------------------
-          # HISTORY
+          # LOAD HISTORICAL SNAPSHOTS
           # ---------------------------------------------------------
 
           snapshots = []
@@ -95,14 +95,36 @@ jobs:
               key=lambda x: x.get("fetched_at", "")
           )
 
-          # Remove duplicate current snapshot if the workflow
-          # has been manually re-run.
-          snapshots = [
-              x for x in snapshots
-              if x.get("fetched_at") != fetched_at
-          ]
+          # ---------------------------------------------------------
+          # LOAD EXISTING EVENTS FOR IDEMPOTENCY
+          #
+          # The same snapshot must never generate the same event
+          # twice, even if the workflow is manually re-run.
+          # ---------------------------------------------------------
 
-          previous = snapshots[-1] if snapshots else None
+          existing_event_keys = set()
+
+          if events_path.exists():
+              for line in events_path.read_text(
+                  encoding="utf-8"
+              ).splitlines():
+
+                  if not line.strip():
+                      continue
+
+                  try:
+                      event = json.loads(line)
+
+                      key = (
+                          event.get("fetched_at"),
+                          event.get("coin"),
+                          event.get("event"),
+                      )
+
+                      existing_event_keys.add(key)
+
+                  except json.JSONDecodeError:
+                      continue
 
           # ---------------------------------------------------------
           # HELPERS
@@ -140,19 +162,22 @@ jobs:
                   bids = data["orderbook"]["bids"]
                   asks = data["orderbook"]["asks"]
 
-                  bid_value = sum(
-                      number(x[0]) * number(x[1])
-                      for x in bids
-                      if number(x[0]) is not None
-                      and number(x[1]) is not None
-                  )
+                  bid_value = 0.0
+                  ask_value = 0.0
 
-                  ask_value = sum(
-                      number(x[0]) * number(x[1])
-                      for x in asks
-                      if number(x[0]) is not None
-                      and number(x[1]) is not None
-                  )
+                  for item in bids:
+                      price = number(item[0])
+                      quantity = number(item[1])
+
+                      if price is not None and quantity is not None:
+                          bid_value += price * quantity
+
+                  for item in asks:
+                      price = number(item[0])
+                      quantity = number(item[1])
+
+                      if price is not None and quantity is not None:
+                          ask_value += price * quantity
 
                   total = bid_value + ask_value
 
@@ -177,29 +202,28 @@ jobs:
 
               for snapshot in snapshots:
                   try:
-                      coin = snapshot["markets"][market]
-                      result.append(coin)
+                      result.append(
+                          snapshot["markets"][market]
+                      )
                   except KeyError:
                       continue
 
               return result
 
           # ---------------------------------------------------------
-          # ADAPTIVE EVENT CLASSIFICATION
-          # ---------------------------------------------------------
+          # EVENT DETECTOR
           #
-          # This detector does NOT decide whether to buy or sell.
+          # IMPORTANT:
           #
-          # It detects meaningful changes in market behaviour.
+          # EVENT != STATE
+          # EVENT != DECISION
+          # EVENT != PUSH
           #
-          # No fixed confirmation count.
-          # No fixed waiting period.
-          # No pullback/breakout price zones.
-          #
-          # The Decision Engine performs the investment interpretation.
+          # This layer only identifies meaningful market behaviour.
           # ---------------------------------------------------------
 
           def detect_event(coin, market):
+
               price = current_price(market)
               volume = current_volume(market)
               pressure = current_orderbook_pressure(market)
@@ -214,7 +238,10 @@ jobs:
                       "event": "INITIAL_OBSERVATION",
                       "decision_relevant": False,
                       "global_validation_required": False,
-                      "push_candidate": False,
+                      "price": price,
+                      "change_from_previous_snapshot": None,
+                      "volume_change": None,
+                      "orderbook_pressure": pressure,
                       "reason": "İlk kullanılabilir gözlem.",
                   }
 
@@ -222,8 +249,6 @@ jobs:
 
               previous_price = number(last.get("last"))
               previous_volume = number(last.get("volume"))
-              previous_high = number(last.get("high"))
-              previous_low = number(last.get("low"))
 
               if previous_price in (None, 0):
                   return None
@@ -236,7 +261,10 @@ jobs:
 
               volume_change = None
 
-              if previous_volume not in (None, 0) and volume is not None:
+              if (
+                  previous_volume not in (None, 0)
+                  and volume is not None
+              ):
                   volume_change = (
                       (volume - previous_volume)
                       / abs(previous_volume)
@@ -244,7 +272,7 @@ jobs:
                   )
 
               # -----------------------------------------------------
-              # Recent structural context
+              # RECENT STRUCTURE
               # -----------------------------------------------------
 
               recent = hist[-8:]
@@ -270,12 +298,17 @@ jobs:
               if not recent_prices:
                   return None
 
-              recent_high = max(recent_highs) if recent_highs else None
-              recent_low = min(recent_lows) if recent_lows else None
+              recent_high = (
+                  max(recent_highs)
+                  if recent_highs
+                  else None
+              )
 
-              # -----------------------------------------------------
-              # Directional context
-              # -----------------------------------------------------
+              recent_low = (
+                  min(recent_lows)
+                  if recent_lows
+                  else None
+              )
 
               earlier_price = (
                   recent_prices[0]
@@ -290,117 +323,157 @@ jobs:
               )
 
               # -----------------------------------------------------
-              # Event classification
+              # EVENT CLASSIFICATION
               # -----------------------------------------------------
 
               event = None
               reason = None
               decision_relevant = False
               global_required = False
-              push_candidate = False
 
-              # Strong upward structural behaviour.
+              # Structural expansion.
+              #
+              # This is the ONLY event that can directly describe
+              # structural expansion.
+              #
+              # Reversal or orderbook pressure cannot promote the
+              # lifecycle into EXPANSION.
+              # -----------------------------------------------------
+
               if (
                   recent_high is not None
                   and price > recent_high
                   and recent_move > 0
               ):
                   event = "EXPANSION_UP"
+
                   reason = (
-                      "Fiyat yakın tarihsel yapının üzerine çıkarak "
-                      "yukarı yönlü genişleme gösteriyor."
+                      "Fiyat yakın tarihsel yapının üzerine "
+                      "çıkarak yukarı yönlü yapısal genişleme "
+                      "gösteriyor."
                   )
+
                   decision_relevant = True
                   global_required = True
-                  push_candidate = True
 
-              # Strong downward structural behaviour.
               elif (
                   recent_low is not None
                   and price < recent_low
                   and recent_move < 0
               ):
                   event = "EXPANSION_DOWN"
+
                   reason = (
-                      "Fiyat yakın tarihsel yapının altına çıkarak "
-                      "aşağı yönlü genişleme gösteriyor."
+                      "Fiyat yakın tarihsel yapının altına "
+                      "çıkarak aşağı yönlü yapısal genişleme "
+                      "gösteriyor."
                   )
+
                   decision_relevant = True
                   global_required = True
-                  push_candidate = True
 
-              # Momentum reversal.
+              # -----------------------------------------------------
+              # REVERSAL
+              #
+              # Reversal is a decision event.
+              # It is NOT automatically an expansion state.
+              # -----------------------------------------------------
+
               elif (
-                  previous_price is not None
-                  and price_change > 0
+                  price_change > 0
                   and recent_move < 0
               ):
                   event = "REVERSAL_UP"
+
                   reason = (
-                      "Önceki zayıflık sonrasında fiyat yönü yukarı "
-                      "dönüyor."
+                      "Önceki zayıflık sonrasında fiyat "
+                      "yönü yukarı dönüyor."
                   )
+
                   decision_relevant = True
                   global_required = True
-                  push_candidate = True
 
               elif (
-                  previous_price is not None
-                  and price_change < 0
+                  price_change < 0
                   and recent_move > 0
               ):
                   event = "REVERSAL_DOWN"
+
                   reason = (
-                      "Önceki güçlenme sonrasında fiyat yönü aşağı "
-                      "dönüyor."
+                      "Önceki güçlenme sonrasında fiyat "
+                      "yönü aşağı dönüyor."
                   )
+
                   decision_relevant = True
                   global_required = True
-                  push_candidate = True
 
-              # Participation change.
+              # -----------------------------------------------------
+              # PARTICIPATION
+              #
+              # Participation is evidence, not a lifecycle state.
+              # -----------------------------------------------------
+
               elif (
                   volume_change is not None
                   and abs(volume_change) >= 25
                   and abs(price_change) >= 0.5
               ):
+
                   if price_change > 0:
                       event = "PARTICIPATION_EXPANSION_UP"
+
                       reason = (
-                          "Fiyat hareketine belirgin katılım artışı "
-                          "eşlik ediyor."
-                      )
-                  else:
-                      event = "PARTICIPATION_EXPANSION_DOWN"
-                      reason = (
-                          "Aşağı yönlü fiyat hareketine belirgin "
+                          "Fiyat hareketine belirgin "
                           "katılım artışı eşlik ediyor."
                       )
 
+                  else:
+                      event = "PARTICIPATION_EXPANSION_DOWN"
+
+                      reason = (
+                          "Aşağı yönlü fiyat hareketine "
+                          "belirgin katılım artışı eşlik ediyor."
+                      )
+
                   decision_relevant = True
                   global_required = True
-                  push_candidate = True
 
-              # Demand / supply regime change.
-              elif pressure == "demand_heavy" and price_change > 0:
+              # -----------------------------------------------------
+              # ORDERBOOK PRESSURE
+              #
+              # Pressure alone does NOT change lifecycle.
+              # It is evidence for the Decision Engine.
+              # -----------------------------------------------------
+
+              elif (
+                  pressure == "demand_heavy"
+                  and price_change > 0
+              ):
+
                   event = "DEMAND_SUPPORT"
-                  reason = (
-                      "Pozitif fiyat hareketi sırasında görünür "
-                      "alış likiditesi baskın."
-                  )
-                  decision_relevant = True
-                  global_required = True
-                  push_candidate = False
 
-              elif pressure == "supply_heavy" and price_change < 0:
-                  event = "SUPPLY_PRESSURE"
                   reason = (
-                      "Negatif fiyat hareketi sırasında görünür "
-                      "satış likiditesi baskın."
+                      "Pozitif fiyat hareketi sırasında "
+                      "görünür alış likiditesi baskın."
                   )
+
                   decision_relevant = True
                   global_required = True
-                  push_candidate = False
+
+              elif (
+                  pressure == "supply_heavy"
+                  and price_change < 0
+              ):
+
+                  event = "SUPPLY_PRESSURE"
+
+                  reason = (
+                      "Negatif fiyat hareketi sırasında "
+                      "görünür satış likiditesi baskın."
+                  )
+
+                  decision_relevant = True
+                  global_required = True
 
               else:
                   return None
@@ -410,7 +483,6 @@ jobs:
                   "event": event,
                   "decision_relevant": decision_relevant,
                   "global_validation_required": global_required,
-                  "push_candidate": push_candidate,
                   "price": price,
                   "change_from_previous_snapshot": price_change,
                   "volume_change": volume_change,
@@ -420,11 +492,17 @@ jobs:
 
           # ---------------------------------------------------------
           # LIFECYCLE
+          #
+          # Only structural/reversal events can change lifecycle.
+          # Evidence events such as SUPPLY_PRESSURE and
+          # DEMAND_SUPPORT do NOT automatically change state.
           # ---------------------------------------------------------
 
           if lifecycle_path.exists():
               lifecycle = json.loads(
-                  lifecycle_path.read_text()
+                  lifecycle_path.read_text(
+                      encoding="utf-8"
+                  )
               )
           else:
               lifecycle = {}
@@ -439,6 +517,25 @@ jobs:
                   print(f"{coin}: no meaningful event")
                   continue
 
+              event_name = detected["event"]
+
+              event_key = (
+                  fetched_at,
+                  coin,
+                  event_name,
+              )
+
+              # -----------------------------------------------------
+              # IDEMPOTENCY
+              # -----------------------------------------------------
+
+              if event_key in existing_event_keys:
+                  print(
+                      f"{coin}: duplicate snapshot/event "
+                      f"ignored ({event_name})"
+                  )
+                  continue
+
               detected_at = datetime.now(
                   timezone.utc
               ).isoformat()
@@ -446,29 +543,44 @@ jobs:
               previous_state = lifecycle.get(
                   coin,
                   {}
-              ).get("state", "UNKNOWN")
+              ).get(
+                  "state",
+                  "UNKNOWN"
+              )
 
-              event_name = detected["event"]
+              # -----------------------------------------------------
+              # STATE TRANSITION
+              # -----------------------------------------------------
 
-              # Lifecycle describes the current market behaviour.
-              if event_name in {
-                  "EXPANSION_UP",
-                  "PARTICIPATION_EXPANSION_UP",
-                  "DEMAND_SUPPORT",
-                  "REVERSAL_UP",
-              }:
+              current_state = previous_state
+
+              if event_name == "EXPANSION_UP":
                   current_state = "EXPANSION_UP"
 
-              elif event_name in {
-                  "EXPANSION_DOWN",
-                  "PARTICIPATION_EXPANSION_DOWN",
-                  "SUPPLY_PRESSURE",
-                  "REVERSAL_DOWN",
-              }:
+              elif event_name == "EXPANSION_DOWN":
                   current_state = "EXPANSION_DOWN"
 
-              else:
+              elif event_name == "REVERSAL_UP":
+                  current_state = "REVERSAL_UP"
+
+              elif event_name == "REVERSAL_DOWN":
+                  current_state = "REVERSAL_DOWN"
+
+              elif event_name == "PARTICIPATION_EXPANSION_UP":
                   current_state = previous_state
+
+              elif event_name == "PARTICIPATION_EXPANSION_DOWN":
+                  current_state = previous_state
+
+              elif event_name == "DEMAND_SUPPORT":
+                  current_state = previous_state
+
+              elif event_name == "SUPPLY_PRESSURE":
+                  current_state = previous_state
+
+              # -----------------------------------------------------
+              # UPDATE LIFECYCLE
+              # -----------------------------------------------------
 
               lifecycle[coin] = {
                   "state": current_state,
@@ -489,14 +601,13 @@ jobs:
                   "global_validation_required": detected[
                       "global_validation_required"
                   ],
-                  "push_candidate": detected[
-                      "push_candidate"
-                  ],
                   "price": detected["price"],
                   "change_from_previous_snapshot": detected[
                       "change_from_previous_snapshot"
                   ],
-                  "volume_change": detected["volume_change"],
+                  "volume_change": detected[
+                      "volume_change"
+                  ],
                   "orderbook_pressure": detected[
                       "orderbook_pressure"
                   ],
@@ -509,10 +620,11 @@ jobs:
               )
 
           # ---------------------------------------------------------
-          # WRITE EVENT + LIFECYCLE
+          # WRITE EVENTS
           # ---------------------------------------------------------
 
           if events_to_write:
+
               events_path.parent.mkdir(
                   parents=True,
                   exist_ok=True
@@ -522,6 +634,7 @@ jobs:
                   "a",
                   encoding="utf-8"
               ) as f:
+
                   for event in events_to_write:
                       f.write(
                           json.dumps(
@@ -530,6 +643,10 @@ jobs:
                           )
                           + "\n"
                       )
+
+          # ---------------------------------------------------------
+          # WRITE LIFECYCLE
+          # ---------------------------------------------------------
 
           lifecycle_path.parent.mkdir(
               parents=True,
@@ -542,7 +659,8 @@ jobs:
                   indent=2,
                   ensure_ascii=False
               )
-              + "\n"
+              + "\n",
+              encoding="utf-8"
           )
 
           print("--------------------------------")
@@ -566,5 +684,5 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Refine adaptive event detector"
+          git commit -m "Separate event and lifecycle state"
           git push origin HEAD:main
