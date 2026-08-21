@@ -8,7 +8,11 @@ on:
       - completed
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: adaptive-event-detector
+  cancel-in-progress: false
 
 jobs:
   detect:
@@ -19,34 +23,283 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate Paribu snapshot
+      - name: Detect market events
+        shell: python
+        run: |
+          import json
+          import os
+          import statistics
+          from pathlib import Path
+          from datetime import datetime, timezone
+
+          COINS = {
+              "VIRTUAL": "virtual_tl",
+              "FET": "fet_tl",
+              "KITE": "kite_tl",
+          }
+
+          latest_path = Path("data/latest.json")
+          state_path = Path("state/lifecycle.json")
+          events_path = Path("state/events.jsonl")
+
+          latest = json.loads(latest_path.read_text())
+          states = json.loads(state_path.read_text())
+
+          if latest.get("ok") is not True:
+              raise SystemExit("Invalid Paribu snapshot: ok != true")
+
+          fetched_at = latest.get("fetched_at")
+          if not fetched_at:
+              raise SystemExit("Missing fetched_at")
+
+          now = datetime.now(timezone.utc)
+          fetched_dt = datetime.fromisoformat(
+              fetched_at.replace("Z", "+00:00")
+          )
+
+          age_seconds = (now - fetched_dt).total_seconds()
+
+          if age_seconds < -300:
+              raise SystemExit("Future-dated Paribu snapshot")
+
+          if age_seconds > 45 * 60:
+              print("Paribu snapshot is stale. No market event evaluation.")
+              raise SystemExit(0)
+
+          # Available history files, newest first.
+          history_files = sorted(
+              Path("history").glob("*.jsonl"),
+              reverse=True
+          )
+
+          history = []
+
+          for file in history_files:
+              lines = file.read_text().splitlines()
+
+              for line in reversed(lines):
+                  if not line.strip():
+                      continue
+
+                  try:
+                      row = json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+
+                  history.append(row)
+
+                  if len(history) >= 200:
+                      break
+
+              if len(history) >= 200:
+                  break
+
+          history.reverse()
+
+          def history_prices(market):
+              values = []
+
+              for row in history:
+                  try:
+                      value = row["markets"][market]["last"]
+                      values.append(float(value))
+                  except (KeyError, TypeError, ValueError):
+                      continue
+
+              return values
+
+          def robust_level(values):
+              if len(values) < 5:
+                  return None
+
+              median = statistics.median(values)
+              deviations = [abs(x - median) for x in values]
+              mad = statistics.median(deviations)
+
+              return median, mad
+
+          events = []
+
+          for coin, market in COINS.items():
+
+              current = latest["markets"][market]["ticker"][0]
+              price = float(current["last"])
+
+              prices = history_prices(market)
+
+              previous_price = prices[-1] if prices else None
+
+              change = None
+              if previous_price and previous_price > 0:
+                  change = (price / previous_price) - 1
+
+              structure = robust_level(prices)
+
+              event = None
+              reason = None
+
+              # 1. New structural high / low
+              if len(prices) >= 8:
+                  recent = prices[:-1]
+
+                  if price > max(recent):
+                      event = "new_structural_high"
+                      reason = "Yeni tarihsel yapı yüksekliği oluştu."
+
+                  elif price < min(recent):
+                      event = "new_structural_low"
+                      reason = "Yeni tarihsel yapı düşüklüğü oluştu."
+
+              # 2. Directional reversal
+              if event is None and len(prices) >= 4:
+                  a, b, c = prices[-3:]
+
+                  previous_direction = b - a
+                  current_direction = c - b
+
+                  if previous_direction != 0 and current_direction != 0:
+                      if (
+                          previous_direction > 0
+                          and current_direction < 0
+                      ):
+                          event = "momentum_reversal_down"
+                          reason = "Yukarı yönlü hareketten aşağı yönlü yapıya geçiş."
+
+                      elif (
+                          previous_direction < 0
+                          and current_direction > 0
+                      ):
+                          event = "momentum_reversal_up"
+                          reason = "Aşağı yönlü hareketten yukarı yönlü yapıya geçiş."
+
+              # 3. Meaningful local movement
+              # Adaptive: compares current move with recent movement
+              # instead of using a fixed confirmation count.
+              if event is None and len(prices) >= 10 and change is not None:
+
+                  recent_changes = []
+
+                  for i in range(1, len(prices)):
+                      if prices[i - 1] > 0:
+                          recent_changes.append(
+                              (prices[i] / prices[i - 1]) - 1
+                          )
+
+                  if len(recent_changes) >= 8:
+                      baseline = statistics.median(
+                          abs(x) for x in recent_changes[-8:]
+                      )
+
+                      if baseline > 0:
+                          if abs(change) >= baseline * 3:
+                              if change > 0:
+                                  event = "acceleration_up"
+                                  reason = (
+                                      "Güncel hareket, yakın dönem normal "
+                                      "hareketliliğinin belirgin şekilde üzerine çıktı."
+                                  )
+                              else:
+                                  event = "acceleration_down"
+                                  reason = (
+                                      "Güncel düşüş, yakın dönem normal "
+                                      "hareketliliğinin belirgin şekilde üzerine çıktı."
+                                  )
+
+              previous_state = states.get(
+                  coin,
+                  {}
+              ).get("state", "UNKNOWN")
+
+              current_state = previous_state
+
+              # Lifecycle mapping is deliberately conservative.
+              if event == "new_structural_high":
+                  current_state = "EXPANSION_UP"
+
+              elif event == "new_structural_low":
+                  current_state = "EXPANSION_DOWN"
+
+              elif event == "momentum_reversal_up":
+                  current_state = "REVERSAL_UP"
+
+              elif event == "momentum_reversal_down":
+                  current_state = "REVERSAL_DOWN"
+
+              elif event == "acceleration_up":
+                  current_state = "ACCELERATION_UP"
+
+              elif event == "acceleration_down":
+                  current_state = "ACCELERATION_DOWN"
+
+              state_changed = current_state != previous_state
+
+              if state_changed or event is not None:
+
+                  event_record = {
+                      "detected_at": datetime.now(timezone.utc).isoformat(),
+                      "fetched_at": fetched_at,
+                      "coin": coin,
+                      "event": event,
+                      "previous_state": previous_state,
+                      "current_state": current_state,
+                      "price": price,
+                      "change_from_previous_snapshot": change,
+                      "reason": reason,
+                  }
+
+                  events.append(event_record)
+
+              if state_changed:
+                  states[coin]["state"] = current_state
+                  states[coin]["last_event"] = event
+                  states[coin]["last_transition_at"] = fetched_at
+                  states[coin]["last_decision"] = None
+
+          # Write lifecycle state.
+          state_path.write_text(
+              json.dumps(states, indent=2, ensure_ascii=False) + "\n"
+          )
+
+          # Append events only when something happened.
+          if events:
+              with events_path.open("a") as f:
+                  for event in events:
+                      f.write(
+                          json.dumps(
+                              event,
+                              ensure_ascii=False
+                          ) + "\n"
+                      )
+
+          print("================================")
+          print("Adaptive Event Detector")
+          print("================================")
+          print(f"Snapshot: {fetched_at}")
+          print(f"Snapshot age: {age_seconds:.0f}s")
+          print(f"Events detected: {len(events)}")
+
+          for event in events:
+              print(
+                  f"{event['coin']}: "
+                  f"{event['previous_state']} -> "
+                  f"{event['current_state']} | "
+                  f"{event['event']}"
+              )
+
+      - name: Commit lifecycle state
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f data/latest.json
-          test -f state/lifecycle.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          jq -e '
-            .ok == true
-            and (.fetched_at | type == "string")
-            and (.markets.virtual_tl.ticker[0].last != null)
-            and (.markets.fet_tl.ticker[0].last != null)
-            and (.markets.kite_tl.ticker[0].last != null)
-          ' data/latest.json > /dev/null
+          git add state/lifecycle.json state/events.jsonl
 
-          echo "Paribu snapshot: OK"
-          echo "Fetched at:"
-          jq -r '.fetched_at' data/latest.json
+          if git diff --cached --quiet; then
+            echo "No lifecycle/event changes."
+            exit 0
+          fi
 
-          echo "Lifecycle state store: OK"
-          jq -r '
-            to_entries[]
-            | "\(.key): \(.value.state)"
-          ' state/lifecycle.json
-
-      - name: Event detector trigger test
-        run: |
-          echo "Adaptive Event Detector triggered successfully."
-          echo "Source workflow: Paribu Market Data"
-          echo "Source run: ${{ github.event.workflow_run.id }}"
+          git commit -m "Update adaptive lifecycle events"
+          git push origin HEAD:main
