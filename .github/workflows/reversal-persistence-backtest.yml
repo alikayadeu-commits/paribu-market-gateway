@@ -1,0 +1,530 @@
+name: Reversal Persistence Backtest
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reversal-backtest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run reversal persistence backtest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import json
+          import glob
+          from datetime import datetime, timezone
+
+          COINS = {
+              "VIRTUAL": "virtual_tl",
+              "FET": "fet_tl",
+              "KITE": "kite_tl",
+          }
+
+          HORIZONS = {
+              "15m": 15 * 60,
+              "1h": 60 * 60,
+          }
+
+          MAX_GAPS = {
+              "15m": 12 * 60,
+              "1h": 20 * 60,
+          }
+
+          PERSISTENCE_SNAPSHOTS = 2
+
+          def parse_time(value):
+              if not value:
+                  return None
+
+              if value.endswith("Z"):
+                  value = value[:-1] + "+00:00"
+
+              dt = datetime.fromisoformat(value)
+
+              if dt.tzinfo is None:
+                  dt = dt.replace(tzinfo=timezone.utc)
+
+              return dt.astimezone(timezone.utc)
+
+          def load_history():
+              snapshots = []
+
+              for path in sorted(glob.glob("history/*.jsonl")):
+                  try:
+                      with open(path, "r", encoding="utf-8") as f:
+                          raw = f.read()
+
+                      try:
+                          wrapper = json.loads(raw)
+
+                          if (
+                              isinstance(wrapper, dict)
+                              and isinstance(wrapper.get("content"), str)
+                          ):
+                              lines = wrapper["content"].splitlines()
+                          else:
+                              lines = raw.splitlines()
+
+                      except json.JSONDecodeError:
+                          lines = raw.splitlines()
+
+                      for line in lines:
+                          line = line.strip()
+
+                          if not line:
+                              continue
+
+                          try:
+                              item = json.loads(line)
+                          except json.JSONDecodeError:
+                              continue
+
+                          timestamp = parse_time(item.get("fetched_at"))
+
+                          if timestamp is None:
+                              continue
+
+                          markets = item.get("markets", {})
+                          prices = {}
+
+                          for coin, market_key in COINS.items():
+                              market = markets.get(market_key, {})
+
+                              try:
+                                  price = float(market.get("last"))
+                              except (TypeError, ValueError):
+                                  price = None
+
+                              if price is not None and price > 0:
+                                  prices[coin] = price
+
+                          if prices:
+                              snapshots.append({
+                                  "timestamp": timestamp,
+                                  "prices": prices
+                              })
+
+                  except OSError:
+                      continue
+
+              snapshots.sort(key=lambda x: x["timestamp"])
+
+              deduped = []
+
+              for snapshot in snapshots:
+                  if (
+                      deduped
+                      and snapshot["timestamp"]
+                      == deduped[-1]["timestamp"]
+                  ):
+                      deduped[-1] = snapshot
+                  else:
+                      deduped.append(snapshot)
+
+              return deduped
+
+          def find_previous(
+              snapshots,
+              index,
+              seconds,
+              max_gap
+          ):
+              current = snapshots[index]["timestamp"].timestamp()
+              target = current - seconds
+
+              for j in range(index - 1, -1, -1):
+                  previous = snapshots[j]["timestamp"].timestamp()
+
+                  if previous <= target:
+                      gap = target - previous
+
+                      if gap <= max_gap:
+                          return snapshots[j]
+
+                      return None
+
+              return None
+
+          def get_return(
+              snapshots,
+              index,
+              coin,
+              horizon
+          ):
+              previous = find_previous(
+                  snapshots,
+                  index,
+                  HORIZONS[horizon],
+                  MAX_GAPS[horizon]
+              )
+
+              if previous is None:
+                  return None
+
+              current_price = snapshots[index]["prices"].get(coin)
+              previous_price = previous["prices"].get(coin)
+
+              if (
+                  current_price is None
+                  or previous_price is None
+                  or previous_price <= 0
+              ):
+                  return None
+
+              return (
+                  (current_price - previous_price)
+                  / previous_price
+                  * 100.0
+              )
+
+          def direction(value):
+              if value is None:
+                  return "UNKNOWN"
+
+              if value > 0:
+                  return "UP"
+
+              if value < 0:
+                  return "DOWN"
+
+              return "FLAT"
+
+          print("========================================")
+          print("REVERSAL PERSISTENCE BACKTEST")
+          print("========================================")
+          print(
+              f"Persistence requirement: "
+              f"{PERSISTENCE_SNAPSHOTS} consecutive snapshots"
+          )
+          print("Approximate persistence: 30 minutes")
+          print()
+
+          snapshots = load_history()
+
+          print(
+              f"Historical snapshots: {len(snapshots)}"
+          )
+
+          if len(snapshots) < 20:
+              raise SystemExit(
+                  "Not enough historical snapshots."
+              )
+
+          print(
+              "History:",
+              snapshots[0]["timestamp"].isoformat(),
+              "->",
+              snapshots[-1]["timestamp"].isoformat()
+          )
+
+          focus_start = datetime(
+              2026, 8, 19, 0, 0, tzinfo=timezone.utc
+          )
+
+          focus_end = datetime(
+              2026, 8, 22, 0, 0, tzinfo=timezone.utc
+          )
+
+          print()
+          print("========================================")
+          print("FOCUS PERIOD: 19-21 AUGUST UTC")
+          print("========================================")
+
+          report = {}
+
+          for coin in COINS:
+              observations = []
+
+              for i in range(len(snapshots)):
+                  short_return = get_return(
+                      snapshots,
+                      i,
+                      coin,
+                      "15m"
+                  )
+
+                  medium_return = get_return(
+                      snapshots,
+                      i,
+                      coin,
+                      "1h"
+                  )
+
+                  if (
+                      short_return is None
+                      or medium_return is None
+                  ):
+                      continue
+
+                  observations.append({
+                      "timestamp": snapshots[i]["timestamp"],
+                      "short_direction": direction(short_return),
+                      "medium_direction": direction(medium_return),
+                      "short_return": short_return,
+                      "medium_return": medium_return,
+                  })
+
+              reversals = []
+
+              for i in range(1, len(observations)):
+                  current = observations[i]
+                  previous = observations[i - 1]
+
+                  previous_direction = (
+                      previous["short_direction"]
+                  )
+
+                  current_direction = (
+                      current["short_direction"]
+                  )
+
+                  if previous_direction not in {
+                      "UP",
+                      "DOWN"
+                  }:
+                      continue
+
+                  if current_direction not in {
+                      "UP",
+                      "DOWN"
+                  }:
+                      continue
+
+                  if (
+                      current_direction
+                      == previous_direction
+                  ):
+                      continue
+
+                  reversal_direction = current_direction
+
+                  confirmations = 1
+
+                  confirmation_records = [
+                      current
+                  ]
+
+                  j = i + 1
+
+                  while (
+                      j < len(observations)
+                      and confirmations
+                      < PERSISTENCE_SNAPSHOTS
+                  ):
+                      next_observation = observations[j]
+
+                      time_gap = (
+                          next_observation["timestamp"]
+                          - observations[j - 1]["timestamp"]
+                      ).total_seconds()
+
+                      if time_gap > 20 * 60:
+                          break
+
+                      if (
+                          next_observation[
+                              "short_direction"
+                          ]
+                          == reversal_direction
+                      ):
+                          confirmations += 1
+                          confirmation_records.append(
+                              next_observation
+                          )
+                      else:
+                          break
+
+                      j += 1
+
+                  timestamp = current["timestamp"]
+
+                  if (
+                      focus_start
+                      <= timestamp
+                      < focus_end
+                  ):
+                      reversals.append({
+                          "timestamp": (
+                              timestamp
+                              .isoformat()
+                              .replace("+00:00", "Z")
+                          ),
+                          "from": previous_direction,
+                          "to": reversal_direction,
+                          "initial_return_pct": round(
+                              current["short_return"],
+                              4
+                          ),
+                          "confirmations": confirmations,
+                          "confirmed": (
+                              confirmations
+                              >= PERSISTENCE_SNAPSHOTS
+                          ),
+                          "medium_direction": (
+                              current["medium_direction"]
+                          ),
+                          "medium_return_pct": round(
+                              current["medium_return"],
+                              4
+                          ),
+                      })
+
+              confirmed = [
+                  item
+                  for item in reversals
+                  if item["confirmed"]
+              ]
+
+              unconfirmed = [
+                  item
+                  for item in reversals
+                  if not item["confirmed"]
+              ]
+
+              # A stronger test:
+              # after a confirmed reversal, did the 1h direction
+              # eventually agree with the reversal direction?
+              aligned_after_reversal = []
+
+              for item in confirmed:
+                  if (
+                      item["medium_direction"]
+                      == item["to"]
+                  ):
+                      aligned_after_reversal.append(item)
+
+              report[coin] = {
+                  "raw_reversals": len(reversals),
+                  "confirmed_reversals": len(confirmed),
+                  "unconfirmed_reversals": len(
+                      unconfirmed
+                  ),
+                  "medium_timeframe_aligned": len(
+                      aligned_after_reversal
+                  ),
+                  "details": reversals,
+              }
+
+              print()
+              print(coin)
+              print(
+                  f"  Raw reversals: "
+                  f"{len(reversals)}"
+              )
+              print(
+                  f"  Confirmed reversals: "
+                  f"{len(confirmed)}"
+              )
+              print(
+                  f"  Unconfirmed reversals: "
+                  f"{len(unconfirmed)}"
+              )
+              print(
+                  f"  1h-aligned confirmed reversals: "
+                  f"{len(aligned_after_reversal)}"
+              )
+
+              if confirmed:
+                  print("  Confirmed examples:")
+
+                  for item in confirmed:
+                      print(
+                          "   ",
+                          item["timestamp"],
+                          "|",
+                          item["from"],
+                          "->",
+                          item["to"],
+                          "|",
+                          f"confirmations="
+                          f"{item['confirmations']}",
+                          "|",
+                          f"1h={item['medium_direction']}"
+                      )
+
+          output = {
+              "schema_version": 1,
+              "generated_at": (
+                  datetime.now(timezone.utc)
+                  .isoformat()
+                  .replace("+00:00", "Z")
+              ),
+              "timezone": "UTC",
+              "persistence_snapshots": (
+                  PERSISTENCE_SNAPSHOTS
+              ),
+              "focus_period": {
+                  "start": (
+                      focus_start
+                      .isoformat()
+                      .replace("+00:00", "Z")
+                  ),
+                  "end": (
+                      focus_end
+                      .isoformat()
+                      .replace("+00:00", "Z")
+                  ),
+              },
+              "results": report,
+          }
+
+          with open(
+              "state/reversal_persistence_backtest.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              json.dump(
+                  output,
+                  f,
+                  indent=2,
+                  ensure_ascii=False
+              )
+              f.write("\n")
+
+          print()
+          print(
+              "Report written to "
+              "state/reversal_persistence_backtest.json"
+          )
+          PY
+
+      - name: Validate report
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import json
+
+          with open(
+              "state/reversal_persistence_backtest.json",
+              "r",
+              encoding="utf-8"
+          ) as f:
+              data = json.load(f)
+
+          assert data["schema_version"] == 1
+          assert data["timezone"] == "UTC"
+          assert data["persistence_snapshots"] == 2
+
+          for coin in (
+              "VIRTUAL",
+              "FET",
+              "KITE"
+          ):
+              assert coin in data["results"]
+
+          print(
+              "Reversal persistence backtest validation: OK"
+          )
+          PY
