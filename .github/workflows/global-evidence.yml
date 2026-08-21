@@ -25,8 +25,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # =========================================================
+      # CHECKOUT
+      # =========================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # =========================================================
+      # COLLECT GLOBAL EVIDENCE
+      # =========================================================
 
       - name: Collect and validate global evidence
         shell: bash
@@ -36,28 +45,36 @@ jobs:
           mkdir -p state
 
           captured_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          current_epoch="$(date -u +%s)"
 
           echo "========================================"
           echo "GLOBAL EVIDENCE LAYER"
           echo "========================================"
           echo "Captured at: ${captured_at}"
 
-          # =========================================================
-          # HELPERS
-          # =========================================================
+          # =======================================================
+          # HELPER: CLASSIFY PARIBU SNAPSHOT AGE
+          # =======================================================
 
-          fetch_json() {
-            local url="$1"
+          classify_paribu_age() {
+            local age="$1"
 
-            curl -fsS \
-              --retry 3 \
-              --retry-delay 1 \
-              --connect-timeout 10 \
-              --max-time 20 \
-              "$url"
+            if [ "$age" -le 1200 ]; then
+              echo "fresh"
+            elif [ "$age" -le 1800 ]; then
+              echo "stale_warning"
+            elif [ "$age" -le 2700 ]; then
+              echo "degraded"
+            else
+              echo "stale"
+            fi
           }
 
-          classify_age() {
+          # =======================================================
+          # HELPER: CLASSIFY GLOBAL MARKET DATA AGE
+          # =======================================================
+
+          classify_global_age() {
             local age="$1"
 
             if [ "$age" -le 300 ]; then
@@ -71,9 +88,24 @@ jobs:
             fi
           }
 
-          # =========================================================
-          # PARIBU
-          # =========================================================
+          # =======================================================
+          # HELPER: FETCH JSON
+          # =======================================================
+
+          fetch_json() {
+            local url="$1"
+
+            curl -fsS \
+              --retry 3 \
+              --retry-delay 1 \
+              --connect-timeout 10 \
+              --max-time 20 \
+              "$url"
+          }
+
+          # =======================================================
+          # PARIBU SNAPSHOT
+          # =======================================================
 
           if [ ! -f data/latest.json ]; then
             echo "ERROR: data/latest.json not found."
@@ -90,17 +122,18 @@ jobs:
             jq -r '.fetched_at // empty' <<< "$paribu_latest"
           )"
 
-          if [ "$paribu_ok" != "true" ]; then
-            echo "WARNING: Paribu snapshot reports unhealthy."
-          fi
-
           if [ -z "$paribu_fetched_at" ]; then
             echo "ERROR: Paribu fetched_at is missing."
             exit 1
           fi
 
-          current_epoch="$(date -u +%s)"
-          paribu_epoch="$(date -u -d "$paribu_fetched_at" +%s)"
+          if [ "$paribu_ok" != "true" ]; then
+            echo "WARNING: Paribu snapshot reports unhealthy."
+          fi
+
+          paribu_epoch="$(
+            date -u -d "$paribu_fetched_at" +%s
+          )"
 
           paribu_age_seconds=$((current_epoch - paribu_epoch))
 
@@ -108,49 +141,57 @@ jobs:
             paribu_age_seconds=0
           fi
 
-          paribu_freshness="$(classify_age "$paribu_age_seconds")"
+          paribu_freshness="$(
+            classify_paribu_age "$paribu_age_seconds"
+          )"
 
           echo "Paribu snapshot: ${paribu_fetched_at}"
           echo "Paribu age: ${paribu_age_seconds}s"
           echo "Paribu freshness: ${paribu_freshness}"
 
-          # =========================================================
-          # PARIBU VALUES
-          # =========================================================
+          # =======================================================
+          # PARIBU MARKET VALUES
+          # =======================================================
 
           paribu_virtual_price="$(
-            jq -r '.markets.virtual_tl.ticker[0].last // null' \
-            <<< "$paribu_latest"
+            jq -r '
+              .markets.virtual_tl.ticker[0].last // null
+            ' <<< "$paribu_latest"
           )"
 
           paribu_fet_price="$(
-            jq -r '.markets.fet_tl.ticker[0].last // null' \
-            <<< "$paribu_latest"
+            jq -r '
+              .markets.fet_tl.ticker[0].last // null
+            ' <<< "$paribu_latest"
           )"
 
           paribu_kite_price="$(
-            jq -r '.markets.kite_tl.ticker[0].last // null' \
-            <<< "$paribu_latest"
+            jq -r '
+              .markets.kite_tl.ticker[0].last // null
+            ' <<< "$paribu_latest"
           )"
 
           paribu_virtual_volume="$(
-            jq -r '.markets.virtual_tl.ticker[0].volume // null' \
-            <<< "$paribu_latest"
+            jq -r '
+              .markets.virtual_tl.ticker[0].volume // null
+            ' <<< "$paribu_latest"
           )"
 
           paribu_fet_volume="$(
-            jq -r '.markets.fet_tl.ticker[0].volume // null' \
-            <<< "$paribu_latest"
+            jq -r '
+              .markets.fet_tl.ticker[0].volume // null
+            ' <<< "$paribu_latest"
           )"
 
           paribu_kite_volume="$(
-            jq -r '.markets.kite_tl.ticker[0].volume // null' \
-            <<< "$paribu_latest"
+            jq -r '
+              .markets.kite_tl.ticker[0].volume // null
+            ' <<< "$paribu_latest"
           )"
 
-          # =========================================================
+          # =======================================================
           # BINANCE
-          # =========================================================
+          # =======================================================
 
           binance_virtual='{}'
           binance_fet='{}'
@@ -195,9 +236,9 @@ jobs:
           echo "Binance KITE: ${binance_kite_status}"
           echo "Binance BTC: ${binance_btc_status}"
 
-          # =========================================================
+          # =======================================================
           # OKX
-          # =========================================================
+          # =======================================================
 
           okx_virtual='{}'
           okx_fet='{}'
@@ -242,12 +283,25 @@ jobs:
           echo "OKX KITE: ${okx_kite_status}"
           echo "OKX BTC: ${okx_btc_status}"
 
-          # =========================================================
+          # =======================================================
           # NORMALIZE BINANCE
-          # =========================================================
+          # =======================================================
 
           normalize_binance() {
             local raw="$1"
+
+            if ! jq empty <<< "$raw" >/dev/null 2>&1; then
+              echo '{
+                "available": false,
+                "symbol": null,
+                "price": null,
+                "change_24h_pct": null,
+                "volume_24h": null,
+                "quote_volume_24h": null,
+                "timestamp_ms": null
+              }'
+              return
+            fi
 
             jq -c '
               if
@@ -271,23 +325,37 @@ jobs:
                   change_24h_pct: (.priceChangePercent | tonumber),
                   volume_24h: (.volume | tonumber),
                   quote_volume_24h: (.quoteVolume | tonumber),
-                  timestamp_ms: (
-                    if .closeTime != null
-                    then (.closeTime | tonumber)
-                    else null
-                    end
-                  )
+                  timestamp_ms:
+                    (
+                      if .closeTime != null
+                      then (.closeTime | tonumber)
+                      else null
+                      end
+                    )
                 }
               end
             ' <<< "$raw"
           }
 
-          # =========================================================
+          # =======================================================
           # NORMALIZE OKX
-          # =========================================================
+          # =======================================================
 
           normalize_okx() {
             local raw="$1"
+
+            if ! jq empty <<< "$raw" >/dev/null 2>&1; then
+              echo '{
+                "available": false,
+                "symbol": null,
+                "price": null,
+                "change_24h_pct": null,
+                "volume_24h": null,
+                "quote_volume_24h": null,
+                "timestamp_ms": null
+              }'
+              return
+            fi
 
             jq -c '
               if
@@ -306,48 +374,50 @@ jobs:
                 }
               else
                 .data[0] as $d |
+
                 {
                   available: true,
 
                   symbol: ($d.instId // null),
 
-                  price: (
-                    ($d.last // "0") | tonumber
-                  ),
+                  price:
+                    (($d.last // "0") | tonumber),
 
-                  change_24h_pct: (
-                    if ($d.open24h // "") != "" then
-                      (
+                  change_24h_pct:
+                    (
+                      if ($d.open24h // "") != ""
+                      then
                         (
-                          ($d.last | tonumber)
-                          -
+                          (
+                            ($d.last | tonumber)
+                            -
+                            ($d.open24h | tonumber)
+                          )
+                          /
                           ($d.open24h | tonumber)
-                        )
-                        /
-                        ($d.open24h | tonumber)
-                      ) * 100
-                    else
-                      null
-                    end
-                  ),
+                        ) * 100
+                      else
+                        null
+                      end
+                    ),
 
-                  volume_24h: (
-                    if ($d.vol24h // "") != "" then
-                      ($d.vol24h | tonumber)
-                    else
-                      null
-                    end
-                  ),
+                  volume_24h:
+                    (
+                      if ($d.vol24h // "") != ""
+                      then ($d.vol24h | tonumber)
+                      else null
+                      end
+                    ),
 
                   quote_volume_24h: null,
 
-                  timestamp_ms: (
-                    if ($d.ts // "") != "" then
-                      ($d.ts | tonumber)
-                    else
-                      null
-                    end
-                  )
+                  timestamp_ms:
+                    (
+                      if ($d.ts // "") != ""
+                      then ($d.ts | tonumber)
+                      else null
+                      end
+                    )
                 }
               end
             ' <<< "$raw"
@@ -363,69 +433,78 @@ jobs:
           ok="$(normalize_okx "$okx_kite")"
           ob="$(normalize_okx "$okx_btc")"
 
-          # =========================================================
-          # GLOBAL TIMESTAMP HEALTH
-          # =========================================================
+          # =======================================================
+          # GLOBAL HEALTH
+          #
+          # Timestamp arithmetic is intentionally done in Bash.
+          # This avoids jq parser problems.
+          # =======================================================
 
-          global_source_health() {
+          global_health() {
             local raw="$1"
 
-            jq -c \
-              --argjson now "$current_epoch" \
-              '
-              if .available != true then
-                {
-                  available: false,
-                  freshness: "unavailable",
-                  age_seconds: null
-                }
+            local available
+            local timestamp_ms
+            local timestamp_epoch
+            local age
+            local freshness
 
-              elif .timestamp_ms == null then
-                {
-                  available: true,
-                  freshness: "unknown",
-                  age_seconds: null
-                }
+            available="$(
+              jq -r '.available // false' <<< "$raw"
+            )"
 
-              else
-                (.timestamp_ms / 1000 | floor) as $ts |
-                ($now - $ts) as $age |
+            if [ "$available" != "true" ]; then
+              echo '{
+                "available": false,
+                "freshness": "unavailable",
+                "age_seconds": null
+              }'
+              return
+            fi
 
-                {
-                  available: true,
+            timestamp_ms="$(
+              jq -r '.timestamp_ms // empty' <<< "$raw"
+            )"
 
-                  freshness:
-                    if $age <= 300 then
-                      "fresh"
-                    elif $age <= 900 then
-                      "stale_warning"
-                    elif $age <= 1800 then
-                      "degraded"
-                    else
-                      "stale"
-                    end,
+            if [ -z "$timestamp_ms" ]; then
+              echo '{
+                "available": true,
+                "freshness": "unknown",
+                "age_seconds": null
+              }'
+              return
+            fi
 
-                  age_seconds:
-                    if $age < 0 then
-                      0
-                    else
-                      $age
-                    end
-                }
-              end
-              '
-            <<< "$raw"
+            timestamp_epoch=$((timestamp_ms / 1000))
+            age=$((current_epoch - timestamp_epoch))
+
+            if [ "$age" -lt 0 ]; then
+              age=0
+            fi
+
+            freshness="$(
+              classify_global_age "$age"
+            )"
+
+            jq -n \
+              --arg freshness "$freshness" \
+              --argjson age "$age" \
+              '{
+                available: true,
+                freshness: $freshness,
+                age_seconds: $age
+              }'
           }
 
-          bv_health="$(global_source_health "$bv")"
-          bf_health="$(global_source_health "$bf")"
-          bk_health="$(global_source_health "$bk")"
-          bb_health="$(global_source_health "$bb")"
+          bv_health="$(global_health "$bv")"
+          bf_health="$(global_health "$bf")"
+          bk_health="$(global_health "$bk")"
+          bb_health="$(global_health "$bb")"
 
-          ov_health="$(global_source_health "$ov")"
-          of_health="$(global_source_health "$of")"
-          ok_health="$(global_source_health "$ok")"
-          ob_health="$(global_source_health "$ob")"
+          ov_health="$(global_health "$ov")"
+          of_health="$(global_health "$of")"
+          ok_health="$(global_health "$ok")"
+          ob_health="$(global_health "$ob")"
 
           echo "Binance VIRTUAL health: ${bv_health}"
           echo "Binance FET health: ${bf_health}"
@@ -437,9 +516,9 @@ jobs:
           echo "OKX KITE health: ${ok_health}"
           echo "OKX BTC health: ${ob_health}"
 
-          # =========================================================
-          # BUILD GLOBAL EVIDENCE JSON
-          # =========================================================
+          # =======================================================
+          # BUILD EVIDENCE
+          # =======================================================
 
           jq -n \
             --arg captured_at "$captured_at" \
@@ -486,6 +565,35 @@ jobs:
               valid_price($x)
               and ($x.change_24h_pct != null);
 
+            def source_fresh($h):
+              ($h.available == true)
+              and
+              (
+                $h.freshness == "fresh"
+                or
+                $h.freshness == "stale_warning"
+              );
+
+            def directional($d):
+              $d == "up" or $d == "down";
+
+            def direction_single($x):
+              if
+                $x.change_24h_pct == null
+              then
+                "unknown"
+              elif
+                $x.change_24h_pct > 0.25
+              then
+                "up"
+              elif
+                $x.change_24h_pct < -0.25
+              then
+                "down"
+              else
+                "flat"
+              end;
+
             def global_direction($a; $b):
               if usable_change($a) and usable_change($b) then
 
@@ -508,24 +616,10 @@ jobs:
                 end
 
               elif usable_change($a) then
-
-                if $a.change_24h_pct > 0.25 then
-                  "up"
-                elif $a.change_24h_pct < -0.25 then
-                  "down"
-                else
-                  "flat"
-                end
+                direction_single($a)
 
               elif usable_change($b) then
-
-                if $b.change_24h_pct > 0.25 then
-                  "up"
-                elif $b.change_24h_pct < -0.25 then
-                  "down"
-                else
-                  "flat"
-                end
+                direction_single($b)
 
               else
                 "unknown"
@@ -534,51 +628,43 @@ jobs:
             def agreement($a; $b):
               if usable_change($a) and usable_change($b) then
                 (
-                  ($a.change_24h_pct - $b.change_24h_pct)
+                  (
+                    $a.change_24h_pct
+                    -
+                    $b.change_24h_pct
+                  )
                   | abs
                 ) <= 1.0
               else
                 false
               end;
 
-            def source_fresh($h):
-              ($h.available == true)
-              and
-              (
-                $h.freshness == "fresh"
-                or
-                $h.freshness == "stale_warning"
-              );
-
-            def directional($direction):
-              (
-                $direction == "up"
-                or
-                $direction == "down"
-              );
-
             def confidence(
-              $binance_health;
-              $okx_health;
+              $a_health;
+              $b_health;
               $agreement_value;
               $direction_value;
-              $btc_available
+              $btc_ok
             ):
 
               if
-                source_fresh($binance_health)
-                and source_fresh($okx_health)
-                and $agreement_value
-                and directional($direction_value)
-                and $btc_available
+                source_fresh($a_health)
+                and
+                source_fresh($b_health)
+                and
+                $agreement_value
+                and
+                directional($direction_value)
+                and
+                $btc_ok
               then
                 "HIGH"
 
               elif
                 (
-                  source_fresh($binance_health)
+                  source_fresh($a_health)
                   or
-                  source_fresh($okx_health)
+                  source_fresh($b_health)
                 )
                 and
                 directional($direction_value)
@@ -593,16 +679,25 @@ jobs:
               captured_at: $captured_at,
 
               freshness_policy: {
-                fresh_max_seconds: 300,
-                stale_warning_max_seconds: 900,
-                degraded_max_seconds: 1800,
-                stale_after_seconds: 1800
+                paribu: {
+                  fresh_max_seconds: 1200,
+                  stale_warning_max_seconds: 1800,
+                  degraded_max_seconds: 2700,
+                  stale_after_seconds: 2700
+                },
+
+                global: {
+                  fresh_max_seconds: 300,
+                  stale_warning_max_seconds: 900,
+                  degraded_max_seconds: 1800,
+                  stale_after_seconds: 1800
+                }
               },
 
               source_health: {
 
                 paribu: {
-                  available: ($paribu_freshness != "stale"),
+                  available: ($paribu_ok == "true"),
                   fetched_at: $paribu_fetched_at,
                   age_seconds: $paribu_age,
                   freshness: $paribu_freshness
@@ -774,17 +869,55 @@ jobs:
                       )
                   }
                 }
+              },
+
+              methodology: {
+
+                local_market:
+                  "Paribu TRY market is local-market evidence.",
+
+                global_market:
+                  "Binance and OKX USDT markets are independent global-market evidence.",
+
+                benchmark:
+                  "BTC/USDT is used as broad crypto-market benchmark.",
+
+                price_comparison:
+                  "TRY local prices are not numerically compared with USDT prices.",
+
+                volume:
+                  "Local and global volume are evaluated within their own markets.",
+
+                confidence:
+                  "HIGH requires fresh Binance and OKX evidence, agreement between them, directional movement and a fresh BTC benchmark.",
+
+                missing_data:
+                  "Unavailable sources are not treated as negative market evidence.",
+
+                stale_data:
+                  "Stale data reduces evidence confidence but does not automatically stop the workflow.",
+
+                decision:
+                  "Global Evidence Layer provides evidence and does not itself make trading decisions."
               }
             }
             ' > state/global_evidence.json
 
+          # =======================================================
+          # VALIDATE OUTPUT
+          # =======================================================
+
+          jq empty state/global_evidence.json
+
+          echo ""
           echo "========================================"
-          echo "GLOBAL EVIDENCE COMPLETE"
+          echo "GLOBAL EVIDENCE SUMMARY"
           echo "========================================"
 
           jq '
             {
               captured_at,
+              freshness_policy,
               paribu: .source_health.paribu,
               binance: .source_health.binance,
               okx: .source_health.okx,
@@ -793,6 +926,10 @@ jobs:
               KITE: .coins.KITE.relationship
             }
           ' state/global_evidence.json
+
+      # =========================================================
+      # COMMIT
+      # =========================================================
 
       - name: Commit global evidence
         shell: bash
@@ -810,4 +947,8 @@ jobs:
           fi
 
           git commit -m "Update global evidence state"
-          git push
+
+          git fetch origin main
+          git rebase origin/main
+
+          git push origin HEAD:main
