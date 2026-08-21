@@ -1,0 +1,398 @@
+name: Adaptive Decision Engine
+
+on:
+  workflow_run:
+    workflows:
+      - "Adaptive Event Detector"
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: adaptive-decision-engine
+  cancel-in-progress: false
+
+jobs:
+  decide:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run decision engine
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+          from datetime import datetime, timezone
+
+          COINS = {
+              "VIRTUAL": "virtual_tl",
+              "FET": "fet_tl",
+              "KITE": "kite_tl",
+              "ATH": "ath_tl",
+          }
+
+          latest_path = Path("data/latest.json")
+          lifecycle_path = Path("state/lifecycle.json")
+          events_path = Path("state/events.jsonl")
+          decision_path = Path("state/decision.json")
+
+          latest = json.loads(latest_path.read_text())
+          lifecycle = json.loads(lifecycle_path.read_text())
+          decisions = json.loads(decision_path.read_text())
+
+          # ---------------------------------------------------------
+          # DATA HEALTH
+          # ---------------------------------------------------------
+
+          if latest.get("ok") is not True:
+              print("Paribu data invalid. No decision.")
+              raise SystemExit(0)
+
+          fetched_at = latest.get("fetched_at")
+
+          if not fetched_at:
+              print("Missing fetched_at. No decision.")
+              raise SystemExit(0)
+
+          fetched_dt = datetime.fromisoformat(
+              fetched_at.replace("Z", "+00:00")
+          )
+
+          now = datetime.now(timezone.utc)
+          age_seconds = (now - fetched_dt).total_seconds()
+
+          if age_seconds < -300:
+              print("Future-dated snapshot. No decision.")
+              raise SystemExit(0)
+
+          if age_seconds > 45 * 60:
+              print("Stale Paribu data. No decision.")
+              raise SystemExit(0)
+
+          # ---------------------------------------------------------
+          # LOAD LAST EVENTS
+          # ---------------------------------------------------------
+
+          events = []
+
+          if events_path.exists():
+              for line in events_path.read_text().splitlines():
+                  if not line.strip():
+                      continue
+
+                  try:
+                      events.append(json.loads(line))
+                  except json.JSONDecodeError:
+                      continue
+
+          latest_events = {}
+
+          for event in events:
+              coin = event.get("coin")
+              if coin in COINS:
+                  latest_events[coin] = event
+
+          # ---------------------------------------------------------
+          # BASIC MARKET EVIDENCE
+          # ---------------------------------------------------------
+
+          def get_market(market):
+              markets = latest.get("markets", {})
+              return markets.get(market)
+
+          def get_last(market_data):
+              try:
+                  return float(
+                      market_data["ticker"][0]["last"]
+                  )
+              except (KeyError, TypeError, ValueError):
+                  return None
+
+          def get_volume(market_data):
+              try:
+                  return float(
+                      market_data["ticker"][0]["volume"]
+                  )
+              except (KeyError, TypeError, ValueError):
+                  return None
+
+          def orderbook_pressure(market_data):
+              """
+              Simple Paribu-side demand/supply observation.
+
+              This is NOT a trade signal.
+              It only describes whether visible bid/ask liquidity
+              is currently heavier.
+              """
+
+              try:
+                  bids = market_data["orderbook"]["bids"]
+                  asks = market_data["orderbook"]["asks"]
+
+                  bid_volume = sum(
+                      float(x[1]) for x in bids
+                  )
+
+                  ask_volume = sum(
+                      float(x[1]) for x in asks
+                  )
+
+                  total = bid_volume + ask_volume
+
+                  if total <= 0:
+                      return "unknown"
+
+                  bid_ratio = bid_volume / total
+
+                  if bid_ratio >= 0.60:
+                      return "demand_heavy"
+
+                  if bid_ratio <= 0.40:
+                      return "supply_heavy"
+
+                  return "balanced"
+
+              except (KeyError, TypeError, ValueError, IndexError):
+                  return "unknown"
+
+          # ---------------------------------------------------------
+          # DECISION LOGIC
+          # ---------------------------------------------------------
+          #
+          # IMPORTANT:
+          # This first version intentionally does NOT pretend to
+          # have Binance/OKX/news data.
+          #
+          # It creates a conservative Paribu-side decision candidate.
+          # Global confirmation will be added as a separate layer.
+          #
+
+          now_iso = datetime.now(timezone.utc).isoformat()
+
+          for coin, market in COINS.items():
+
+              market_data = get_market(market)
+
+              if not market_data:
+                  print(f"{coin}: market data unavailable")
+                  continue
+
+              price = get_last(market_data)
+              volume = get_volume(market_data)
+              pressure = orderbook_pressure(market_data)
+
+              if price is None:
+                  print(f"{coin}: invalid price")
+                  continue
+
+              event = latest_events.get(coin)
+
+              previous_decision = decisions.get(
+                  coin,
+                  {}
+              ).get("decision", "NONE")
+
+              lifecycle_state = lifecycle.get(
+                  coin,
+                  {}
+              ).get("state", "UNKNOWN")
+
+              decision = "NONE"
+              reason = "No sufficiently strong Paribu-side evidence."
+
+              event_name = (
+                  event.get("event")
+                  if event
+                  else None
+              )
+
+              # -----------------------------------------------------
+              # UPWARD CASE
+              # -----------------------------------------------------
+
+              upward_event = event_name in {
+                  "structural_expansion_up",
+                  "momentum_acceleration_up",
+                  "momentum_reversal_up",
+              }
+
+              downward_event = event_name in {
+                  "structural_expansion_down",
+                  "momentum_acceleration_down",
+                  "momentum_reversal_down",
+              }
+
+              if upward_event:
+
+                  if pressure == "demand_heavy":
+                      decision = "ADD_CONSIDER"
+                      reason = (
+                          "Yukarı yönlü event ile birlikte "
+                          "Paribu order book görünür talep "
+                          "ağırlığını destekliyor."
+                      )
+
+                  elif pressure == "supply_heavy":
+                      decision = "WAIT"
+                      reason = (
+                          "Yukarı yönlü event var ancak "
+                          "görünür arz baskısı hareketi "
+                          "zayıflatıyor."
+                      )
+
+                  else:
+                      decision = "WAIT"
+                      reason = (
+                          "Yukarı yönlü event mevcut ancak "
+                          "Paribu tarafında yeterli arz-talep "
+                          "teyidi yok."
+                      )
+
+              # -----------------------------------------------------
+              # DOWNWARD CASE
+              # -----------------------------------------------------
+
+              elif downward_event:
+
+                  if pressure == "supply_heavy":
+                      decision = "REDUCE_PROFIT"
+                      reason = (
+                          "Aşağı yönlü event ile birlikte "
+                          "Paribu order book görünür arz "
+                          "ağırlığını gösteriyor."
+                      )
+
+                  elif pressure == "demand_heavy":
+                      decision = "WAIT"
+                      reason = (
+                          "Aşağı yönlü event mevcut ancak "
+                          "güçlü görünür talep düşüşü "
+                          "absorbe ediyor olabilir."
+                      )
+
+                  else:
+                      decision = "WAIT"
+                      reason = (
+                          "Aşağı yönlü event mevcut ancak "
+                          "Paribu tarafında yeterli teyit yok."
+                      )
+
+              # -----------------------------------------------------
+              # NO EVENT
+              # -----------------------------------------------------
+
+              else:
+                  decision = "NONE"
+                  reason = (
+                      "Yeni anlamlı event bulunmadı."
+                  )
+
+              # -----------------------------------------------------
+              # PUSH KEY
+              # -----------------------------------------------------
+
+              push_key = (
+                  f"{coin}|"
+                  f"{event_name}|"
+                  f"{lifecycle_state}|"
+                  f"{decision}"
+              )
+
+              previous_push_key = decisions.get(
+                  coin,
+                  {}
+              ).get("last_push_key")
+
+              # -----------------------------------------------------
+              # UPDATE DECISION STATE
+              # -----------------------------------------------------
+
+              decisions[coin] = {
+                  "decision": decision,
+                  "last_decision_at": now_iso,
+                  "last_event": event_name,
+                  "last_lifecycle_state": lifecycle_state,
+                  "last_push_key": (
+                      push_key
+                      if decision != "NONE"
+                      else previous_push_key
+                  ),
+                  "reason": reason,
+                  "price": price,
+                  "volume": volume,
+                  "orderbook_pressure": pressure,
+                  "global_status": "NOT_CONNECTED_YET",
+              }
+
+              # -----------------------------------------------------
+              # OUTPUT
+              # -----------------------------------------------------
+
+              if decision == "NONE":
+                  print(
+                      f"{coin}: SILENT | "
+                      f"{reason}"
+                  )
+                  continue
+
+              if push_key == previous_push_key:
+                  print(
+                      f"{coin}: SAME DECISION / "
+                      f"SILENT | {decision}"
+                  )
+                  continue
+
+              print(
+                  f"{coin}: NEW DECISION | "
+                  f"{decision} | "
+                  f"event={event_name} | "
+                  f"state={lifecycle_state} | "
+                  f"pressure={pressure}"
+              )
+
+          # ---------------------------------------------------------
+          # WRITE
+          # ---------------------------------------------------------
+
+          decision_path.write_text(
+              json.dumps(
+                  decisions,
+                  indent=2,
+                  ensure_ascii=False
+              ) + "\n"
+          )
+
+          print("================================")
+          print("Adaptive Decision Engine")
+          print("================================")
+          print(f"Snapshot: {fetched_at}")
+          print(f"Snapshot age: {age_seconds:.0f}s")
+          print("Decision state updated.")
+
+      - name: Commit decision state
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add state/decision.json
+
+          if git diff --cached --quiet; then
+            echo "No decision-state changes."
+            exit 0
+          fi
+
+          git commit -m "Add adaptive decision engine"
+          git push origin HEAD:main
