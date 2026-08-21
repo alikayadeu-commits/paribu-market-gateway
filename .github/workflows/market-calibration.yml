@@ -1,0 +1,457 @@
+name: Market Calibration
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: market-calibration
+  cancel-in-progress: false
+
+jobs:
+  calibrate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build market calibration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import json
+          import math
+          import os
+          import glob
+          from datetime import datetime, timezone
+
+          COINS = {
+              "VIRTUAL": "virtual_tl",
+              "FET": "fet_tl",
+              "KITE": "kite_tl",
+          }
+
+          HORIZONS = {
+              "15m": 15 * 60,
+              "1h": 60 * 60,
+              "4h": 4 * 60 * 60,
+              "24h": 24 * 60 * 60,
+          }
+
+          MAX_GAPS = {
+              "15m": 12 * 60,
+              "1h": 20 * 60,
+              "4h": 30 * 60,
+              "24h": 45 * 60,
+          }
+
+          def parse_time(value):
+              if not value:
+                  return None
+
+              value = value.strip()
+
+              if value.endswith("Z"):
+                  value = value[:-1] + "+00:00"
+
+              dt = datetime.fromisoformat(value)
+
+              if dt.tzinfo is None:
+                  dt = dt.replace(tzinfo=timezone.utc)
+
+              return dt.astimezone(timezone.utc)
+
+          def percentile(values, p):
+              if not values:
+                  return None
+
+              values = sorted(values)
+
+              if len(values) == 1:
+                  return values[0]
+
+              rank = (len(values) - 1) * p
+              low = int(math.floor(rank))
+              high = int(math.ceil(rank))
+
+              if low == high:
+                  return values[low]
+
+              fraction = rank - low
+              return values[low] + (values[high] - values[low]) * fraction
+
+          def stats(values):
+              if not values:
+                  return {
+                      "samples": 0,
+                      "p50": None,
+                      "p75": None,
+                      "p90": None,
+                      "p95": None,
+                      "p97_5": None,
+                      "p99": None,
+                  }
+
+              return {
+                  "samples": len(values),
+                  "p50": round(percentile(values, 0.50), 6),
+                  "p75": round(percentile(values, 0.75), 6),
+                  "p90": round(percentile(values, 0.90), 6),
+                  "p95": round(percentile(values, 0.95), 6),
+                  "p97_5": round(percentile(values, 0.975), 6),
+                  "p99": round(percentile(values, 0.99), 6),
+              }
+
+          def movement_band(p90, p97_5, p99):
+              if p90 is None:
+                  return "insufficient_data"
+
+              return {
+                  "normal_max_abs_pct": round(p90, 4),
+                  "elevated_max_abs_pct": round(p97_5 if p97_5 is not None else p90, 4),
+                  "extreme_max_abs_pct": round(p99 if p99 is not None else (p97_5 or p90), 4),
+              }
+
+          # ------------------------------------------------------------
+          # Read history files.
+          #
+          # The repository stores historical files as JSON wrappers whose
+          # "content" field contains JSONL. This parser supports both that
+          # format and ordinary JSONL files.
+          # ------------------------------------------------------------
+
+          snapshots = []
+
+          for path in sorted(glob.glob("history/*.jsonl")):
+              try:
+                  with open(path, "r", encoding="utf-8") as f:
+                      raw = f.read()
+
+                  lines = []
+
+                  # Current repository format:
+                  # { "content": "...jsonl..." }
+                  try:
+                      wrapper = json.loads(raw)
+
+                      if isinstance(wrapper, dict) and isinstance(wrapper.get("content"), str):
+                          lines = wrapper["content"].splitlines()
+                      else:
+                          lines = raw.splitlines()
+
+                  except json.JSONDecodeError:
+                      lines = raw.splitlines()
+
+                  for line in lines:
+                      line = line.strip()
+
+                      if not line:
+                          continue
+
+                      try:
+                          item = json.loads(line)
+                      except json.JSONDecodeError:
+                          continue
+
+                      fetched_at = parse_time(item.get("fetched_at"))
+
+                      if fetched_at is None:
+                          continue
+
+                      markets = item.get("markets", {})
+
+                      prices = {}
+
+                      for coin, market_key in COINS.items():
+                          market = markets.get(market_key, {})
+
+                          try:
+                              price = float(market.get("last"))
+                          except (TypeError, ValueError):
+                              price = None
+
+                          if price is not None and price > 0:
+                              prices[coin] = price
+
+                      if prices:
+                          snapshots.append({
+                              "timestamp": fetched_at,
+                              "prices": prices,
+                          })
+
+              except OSError:
+                  continue
+
+          snapshots.sort(key=lambda x: x["timestamp"])
+
+          # Remove duplicate timestamps.
+          deduped = []
+
+          for snapshot in snapshots:
+              if deduped and snapshot["timestamp"] == deduped[-1]["timestamp"]:
+                  deduped[-1] = snapshot
+              else:
+                  deduped.append(snapshot)
+
+          snapshots = deduped
+
+          if len(snapshots) < 20:
+              raise SystemExit(
+                  f"Not enough historical snapshots for calibration: {len(snapshots)}"
+              )
+
+          captured_at = datetime.now(timezone.utc)
+
+          history_start = snapshots[0]["timestamp"]
+          history_end = snapshots[-1]["timestamp"]
+
+          def find_previous(index, target_seconds, max_gap):
+              current_time = snapshots[index]["timestamp"]
+              target_time = current_time.timestamp() - target_seconds
+
+              best = None
+
+              # Search backwards because history is chronological.
+              for j in range(index - 1, -1, -1):
+                  previous_time = snapshots[j]["timestamp"].timestamp()
+
+                  if previous_time <= target_time:
+                      gap = target_time - previous_time
+
+                      if gap <= max_gap:
+                          best = snapshots[j]
+                      break
+
+              return best
+
+          calibration = {
+              "schema_version": 1,
+              "generated_at": captured_at.isoformat().replace("+00:00", "Z"),
+              "timezone": "UTC",
+              "history": {
+                  "start": history_start.isoformat().replace("+00:00", "Z"),
+                  "end": history_end.isoformat().replace("+00:00", "Z"),
+                  "snapshots": len(snapshots),
+              },
+              "method": {
+                  "description": (
+                      "Adaptive Paribu market calibration based on historical "
+                      "price-return distributions. The 15m snapshot cadence is "
+                      "the data resolution, not a fixed decision window."
+                  ),
+                  "return_horizons": list(HORIZONS.keys()),
+                  "absolute_return_percentiles": [
+                      "p50",
+                      "p75",
+                      "p90",
+                      "p95",
+                      "p97_5",
+                      "p99",
+                  ],
+                  "interpretation": {
+                      "normal": "absolute return below p90",
+                      "elevated": "absolute return at or above p90 and below p97_5",
+                      "extreme": "absolute return at or above p97_5 and below p99",
+                      "exceptional": "absolute return at or above p99",
+                  },
+              },
+              "coins": {},
+          }
+
+          for coin in COINS:
+              signed_returns = {h: [] for h in HORIZONS}
+              absolute_returns = {h: [] for h in HORIZONS}
+
+              for i, snapshot in enumerate(snapshots):
+                  current_price = snapshot["prices"].get(coin)
+
+                  if current_price is None:
+                      continue
+
+                  for horizon, seconds in HORIZONS.items():
+                      previous = find_previous(
+                          i,
+                          seconds,
+                          MAX_GAPS[horizon],
+                      )
+
+                      if previous is None:
+                          continue
+
+                      previous_price = previous["prices"].get(coin)
+
+                      if previous_price is None or previous_price <= 0:
+                          continue
+
+                      signed_pct = (
+                          (current_price - previous_price)
+                          / previous_price
+                          * 100.0
+                      )
+
+                      signed_returns[horizon].append(signed_pct)
+                      absolute_returns[horizon].append(abs(signed_pct))
+
+              horizon_output = {}
+
+              for horizon in HORIZONS:
+                  signed_stats = stats(signed_returns[horizon])
+                  absolute_stats = stats(absolute_returns[horizon])
+
+                  horizon_output[horizon] = {
+                      "signed_return_pct": signed_stats,
+                      "absolute_return_pct": absolute_stats,
+                      "movement_band": movement_band(
+                          absolute_stats["p90"],
+                          absolute_stats["p97_5"],
+                          absolute_stats["p99"],
+                      ),
+              }
+
+              # A simple regime indicator based on the distribution of
+              # 1-hour absolute movement. This is deliberately descriptive;
+              # it does not directly create a trade signal.
+              one_hour = absolute_returns["1h"]
+
+              if not one_hour:
+                  regime = "insufficient_data"
+              else:
+                  p50 = percentile(one_hour, 0.50)
+                  p90 = percentile(one_hour, 0.90)
+
+                  latest_1h = None
+
+                  for i in range(len(snapshots) - 1, -1, -1):
+                      current_price = snapshots[i]["prices"].get(coin)
+
+                      if current_price is None:
+                          continue
+
+                      previous = find_previous(
+                          i,
+                          HORIZONS["1h"],
+                          MAX_GAPS["1h"],
+                      )
+
+                      if previous is None:
+                          continue
+
+                      previous_price = previous["prices"].get(coin)
+
+                      if previous_price and previous_price > 0:
+                          latest_1h = abs(
+                              (current_price - previous_price)
+                              / previous_price
+                              * 100.0
+                          )
+                          break
+
+                  if latest_1h is None:
+                      regime = "unknown"
+                  elif latest_1h >= p90:
+                      regime = "high"
+                  elif latest_1h >= p50:
+                      regime = "elevated"
+                  else:
+                      regime = "normal"
+
+              calibration["coins"][coin] = {
+                  "current_price": snapshots[-1]["prices"].get(coin),
+                  "current_snapshot_at": snapshots[-1]["timestamp"].isoformat().replace("+00:00", "Z"),
+                  "current_1h_regime": regime,
+                  "horizons": horizon_output,
+              }
+
+          os.makedirs("state", exist_ok=True)
+
+          output_path = "state/calibration.json"
+
+          with open(output_path, "w", encoding="utf-8") as f:
+              json.dump(
+                  calibration,
+                  f,
+                  indent=2,
+                  ensure_ascii=False,
+              )
+              f.write("\n")
+
+          print("========================================")
+          print("MARKET CALIBRATION")
+          print("========================================")
+          print(f"Snapshots: {len(snapshots)}")
+          print(
+              "History:",
+              history_start.isoformat(),
+              "->",
+              history_end.isoformat(),
+          )
+
+          for coin, data in calibration["coins"].items():
+              print()
+              print(coin)
+              print(f"  Current price: {data['current_price']}")
+              print(f"  Current 1h regime: {data['current_1h_regime']}")
+
+              for horizon, hdata in data["horizons"].items():
+                  band = hdata["movement_band"]
+                  print(
+                      f"  {horizon}: "
+                      f"P90={band['normal_max_abs_pct']}% "
+                      f"P97.5={band['elevated_max_abs_pct']}% "
+                      f"P99={band['extreme_max_abs_pct']}%"
+                  )
+
+          print()
+          print(f"Calibration written to {output_path}")
+          PY
+
+      - name: Validate calibration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+
+          path = "state/calibration.json"
+
+          with open(path, "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          assert data["schema_version"] == 1
+          assert data["timezone"] == "UTC"
+          assert data["history"]["snapshots"] > 0
+
+          for coin in ("VIRTUAL", "FET", "KITE"):
+              assert coin in data["coins"]
+
+              for horizon in ("15m", "1h", "4h", "24h"):
+                  assert horizon in data["coins"][coin]["horizons"]
+
+          print("Calibration JSON validation: OK")
+          PY
+
+      - name: Commit calibration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add state/calibration.json
+
+          if git diff --cached --quiet; then
+            echo "No calibration change to commit."
+            exit 0
+          fi
+
+          git commit -m "Update adaptive market calibration"
+          git push
