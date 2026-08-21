@@ -23,11 +23,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Detect market events
+      - name: Detect adaptive market events
         shell: python
         run: |
           import json
-          import os
           import statistics
           from pathlib import Path
           from datetime import datetime, timezone
@@ -49,10 +48,12 @@ jobs:
               raise SystemExit("Invalid Paribu snapshot: ok != true")
 
           fetched_at = latest.get("fetched_at")
+
           if not fetched_at:
               raise SystemExit("Missing fetched_at")
 
           now = datetime.now(timezone.utc)
+
           fetched_dt = datetime.fromisoformat(
               fetched_at.replace("Z", "+00:00")
           )
@@ -63,10 +64,13 @@ jobs:
               raise SystemExit("Future-dated Paribu snapshot")
 
           if age_seconds > 45 * 60:
-              print("Paribu snapshot is stale. No market event evaluation.")
+              print("Paribu snapshot is stale. No event evaluation.")
               raise SystemExit(0)
 
-          # Available history files, newest first.
+          # ---------------------------------------------------------
+          # LOAD HISTORY
+          # ---------------------------------------------------------
+
           history_files = sorted(
               Path("history").glob("*.jsonl"),
               reverse=True
@@ -88,35 +92,36 @@ jobs:
 
                   history.append(row)
 
-                  if len(history) >= 200:
+                  if len(history) >= 240:
                       break
 
-              if len(history) >= 200:
+              if len(history) >= 240:
                   break
 
           history.reverse()
 
-          def history_prices(market):
+          def get_prices(market):
               values = []
 
               for row in history:
                   try:
-                      value = row["markets"][market]["last"]
-                      values.append(float(value))
+                      value = float(
+                          row["markets"][market]["last"]
+                      )
+                      values.append(value)
                   except (KeyError, TypeError, ValueError):
                       continue
 
               return values
 
-          def robust_level(values):
-              if len(values) < 5:
+          def pct_change(a, b):
+              if a is None or a <= 0:
                   return None
+              return (b / a) - 1
 
-              median = statistics.median(values)
-              deviations = [abs(x - median) for x in values]
-              mad = statistics.median(deviations)
-
-              return median, mad
+          # ---------------------------------------------------------
+          # EVENT CLASSIFICATION
+          # ---------------------------------------------------------
 
           events = []
 
@@ -125,99 +130,181 @@ jobs:
               current = latest["markets"][market]["ticker"][0]
               price = float(current["last"])
 
-              prices = history_prices(market)
+              prices = get_prices(market)
 
-              previous_price = prices[-1] if prices else None
+              # History already contains the current snapshot.
+              # Therefore the previous snapshot is [-2], not [-1].
+              if len(prices) < 3:
+                  print(f"{coin}: insufficient history")
+                  continue
 
-              change = None
-              if previous_price and previous_price > 0:
-                  change = (price / previous_price) - 1
+              previous_price = prices[-2]
 
-              structure = robust_level(prices)
+              current_change = pct_change(
+                  previous_price,
+                  price
+              )
+
+              if current_change is None:
+                  continue
+
+              # -----------------------------------------------------
+              # Adaptive reference set
+              # -----------------------------------------------------
+              #
+              # No fixed timeframe is imposed.
+              # The detector uses the available history and adapts
+              # the effective reference window to the amount of data.
+              #
+
+              available = len(prices) - 1
+
+              if available < 6:
+                  reference = prices[:-1]
+              else:
+                  dynamic_window = max(
+                      6,
+                      min(
+                          available,
+                          max(6, available // 3)
+                      )
+                  )
+
+                  reference = prices[-(dynamic_window + 1):-1]
+
+              if len(reference) < 3:
+                  continue
+
+              reference_returns = []
+
+              for i in range(1, len(reference)):
+                  change = pct_change(
+                      reference[i - 1],
+                      reference[i]
+                  )
+
+                  if change is not None:
+                      reference_returns.append(change)
+
+              if not reference_returns:
+                  continue
+
+              median_return = statistics.median(
+                  reference_returns
+              )
+
+              median_abs_return = statistics.median(
+                  abs(x) for x in reference_returns
+              )
+
+              # -----------------------------------------------------
+              # Adaptive structure
+              # -----------------------------------------------------
+
+              reference_high = max(reference)
+              reference_low = min(reference)
 
               event = None
               reason = None
 
-              # 1. New structural high / low
-              if len(prices) >= 8:
-                  recent = prices[:-1]
+              # 1. Structural expansion
+              if price > reference_high and current_change > 0:
+                  event = "structural_expansion_up"
+                  reason = (
+                      "Fiyat mevcut adaptif referans yapısının "
+                      "üzerine çıkarak yukarı genişledi."
+                  )
 
-                  if price > max(recent):
-                      event = "new_structural_high"
-                      reason = "Yeni tarihsel yapı yüksekliği oluştu."
+              elif price < reference_low and current_change < 0:
+                  event = "structural_expansion_down"
+                  reason = (
+                      "Fiyat mevcut adaptif referans yapısının "
+                      "altına çıkarak aşağı genişledi."
+                  )
 
-                  elif price < min(recent):
-                      event = "new_structural_low"
-                      reason = "Yeni tarihsel yapı düşüklüğü oluştu."
+              # 2. Momentum acceleration
+              if event is None and median_abs_return > 0:
 
-              # 2. Directional reversal
-              if event is None and len(prices) >= 4:
-                  a, b, c = prices[-3:]
+                  acceleration_ratio = (
+                      abs(current_change)
+                      / median_abs_return
+                  )
 
-                  previous_direction = b - a
-                  current_direction = c - b
+                  if acceleration_ratio >= 2.5:
 
-                  if previous_direction != 0 and current_direction != 0:
-                      if (
-                          previous_direction > 0
-                          and current_direction < 0
-                      ):
-                          event = "momentum_reversal_down"
-                          reason = "Yukarı yönlü hareketten aşağı yönlü yapıya geçiş."
-
-                      elif (
-                          previous_direction < 0
-                          and current_direction > 0
-                      ):
-                          event = "momentum_reversal_up"
-                          reason = "Aşağı yönlü hareketten yukarı yönlü yapıya geçiş."
-
-              # 3. Meaningful local movement
-              # Adaptive: compares current move with recent movement
-              # instead of using a fixed confirmation count.
-              if event is None and len(prices) >= 10 and change is not None:
-
-                  recent_changes = []
-
-                  for i in range(1, len(prices)):
-                      if prices[i - 1] > 0:
-                          recent_changes.append(
-                              (prices[i] / prices[i - 1]) - 1
+                      if current_change > 0:
+                          event = "momentum_acceleration_up"
+                          reason = (
+                              "Güncel hareket, yakın dönem "
+                              "normal hareketliliğinin belirgin "
+                              "şekilde üzerine çıktı."
                           )
 
-                  if len(recent_changes) >= 8:
-                      baseline = statistics.median(
-                          abs(x) for x in recent_changes[-8:]
+                      elif current_change < 0:
+                          event = "momentum_acceleration_down"
+                          reason = (
+                              "Güncel düşüş, yakın dönem "
+                              "normal hareketliliğinin belirgin "
+                              "şekilde üzerine çıktı."
+                          )
+
+              # 3. Directional reversal
+              if event is None and len(reference_returns) >= 3:
+
+                  positive_pressure = sum(
+                      1 for x in reference_returns
+                      if x > 0
+                  )
+
+                  negative_pressure = sum(
+                      1 for x in reference_returns
+                      if x < 0
+                  )
+
+                  if (
+                      positive_pressure > negative_pressure
+                      and current_change < 0
+                  ):
+                      event = "momentum_reversal_down"
+                      reason = (
+                          "Önceki yönlü baskı zayıflarken "
+                          "güncel fiyat hareketi aşağı döndü."
                       )
 
-                      if baseline > 0:
-                          if abs(change) >= baseline * 3:
-                              if change > 0:
-                                  event = "acceleration_up"
-                                  reason = (
-                                      "Güncel hareket, yakın dönem normal "
-                                      "hareketliliğinin belirgin şekilde üzerine çıktı."
-                                  )
-                              else:
-                                  event = "acceleration_down"
-                                  reason = (
-                                      "Güncel düşüş, yakın dönem normal "
-                                      "hareketliliğinin belirgin şekilde üzerine çıktı."
-                                  )
+                  elif (
+                      negative_pressure > positive_pressure
+                      and current_change > 0
+                  ):
+                      event = "momentum_reversal_up"
+                      reason = (
+                          "Önceki yönlü baskı zayıflarken "
+                          "güncel fiyat hareketi yukarı döndü."
+                      )
 
-              previous_state = states.get(
-                  coin,
-                  {}
-              ).get("state", "UNKNOWN")
+              # 4. No meaningful event
+              if event is None:
+                  continue
 
-              current_state = previous_state
+              previous_state = (
+                  states.get(coin, {})
+                  .get("state", "UNKNOWN")
+              )
 
-              # Lifecycle mapping is deliberately conservative.
-              if event == "new_structural_high":
+              # -----------------------------------------------------
+              # Lifecycle state
+              # -----------------------------------------------------
+
+              if event == "structural_expansion_up":
                   current_state = "EXPANSION_UP"
 
-              elif event == "new_structural_low":
+              elif event == "structural_expansion_down":
                   current_state = "EXPANSION_DOWN"
+
+              elif event == "momentum_acceleration_up":
+                  current_state = "ACCELERATION_UP"
+
+              elif event == "momentum_acceleration_down":
+                  current_state = "ACCELERATION_DOWN"
 
               elif event == "momentum_reversal_up":
                   current_state = "REVERSAL_UP"
@@ -225,42 +312,71 @@ jobs:
               elif event == "momentum_reversal_down":
                   current_state = "REVERSAL_DOWN"
 
-              elif event == "acceleration_up":
-                  current_state = "ACCELERATION_UP"
+              else:
+                  current_state = previous_state
 
-              elif event == "acceleration_down":
-                  current_state = "ACCELERATION_DOWN"
+              # -----------------------------------------------------
+              # IMPORTANT:
+              # Same-state event = SILENT.
+              # Lifecycle transition is what matters.
+              # -----------------------------------------------------
 
-              state_changed = current_state != previous_state
+              state_changed = (
+                  current_state != previous_state
+              )
 
-              if state_changed or event is not None:
+              if not state_changed:
+                  print(
+                      f"{coin}: same state "
+                      f"{current_state}; silent"
+                  )
+                  continue
 
-                  event_record = {
-                      "detected_at": datetime.now(timezone.utc).isoformat(),
-                      "fetched_at": fetched_at,
-                      "coin": coin,
-                      "event": event,
-                      "previous_state": previous_state,
-                      "current_state": current_state,
-                      "price": price,
-                      "change_from_previous_snapshot": change,
-                      "reason": reason,
-                  }
+              detected_at = datetime.now(
+                  timezone.utc
+              ).isoformat()
 
-                  events.append(event_record)
+              event_record = {
+                  "detected_at": detected_at,
+                  "fetched_at": fetched_at,
+                  "coin": coin,
+                  "event": event,
+                  "previous_state": previous_state,
+                  "current_state": current_state,
+                  "price": price,
+                  "change_from_previous_snapshot": current_change,
+                  "reference_high": reference_high,
+                  "reference_low": reference_low,
+                  "reason": reason,
+              }
 
-              if state_changed:
-                  states[coin]["state"] = current_state
-                  states[coin]["last_event"] = event
-                  states[coin]["last_transition_at"] = fetched_at
-                  states[coin]["last_decision"] = None
+              events.append(event_record)
 
-          # Write lifecycle state.
+              # Update lifecycle state.
+              if coin not in states:
+                  states[coin] = {}
+
+              states[coin]["state"] = current_state
+              states[coin]["last_event"] = event
+              states[coin]["last_transition_at"] = fetched_at
+              states[coin]["last_decision"] = None
+
+          # ---------------------------------------------------------
+          # WRITE STATE
+          # ---------------------------------------------------------
+
           state_path.write_text(
-              json.dumps(states, indent=2, ensure_ascii=False) + "\n"
+              json.dumps(
+                  states,
+                  indent=2,
+                  ensure_ascii=False
+              ) + "\n"
           )
 
-          # Append events only when something happened.
+          # ---------------------------------------------------------
+          # WRITE EVENTS
+          # ---------------------------------------------------------
+
           if events:
               with events_path.open("a") as f:
                   for event in events:
