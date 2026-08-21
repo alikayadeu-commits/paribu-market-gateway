@@ -6,6 +6,7 @@ on:
       - "Adaptive Event Detector"
     types:
       - completed
+
   workflow_dispatch:
 
 permissions:
@@ -32,7 +33,7 @@ jobs:
         run: |
           import json
           from pathlib import Path
-          from datetime import datetime, timezone
+          from datetime import datetime, timezone, timedelta
 
           COINS = {
               "VIRTUAL": "virtual_tl",
@@ -42,17 +43,26 @@ jobs:
           }
 
           latest_path = Path("data/latest.json")
+          history_dir = Path("history")
           lifecycle_path = Path("state/lifecycle.json")
           events_path = Path("state/events.jsonl")
           decision_path = Path("state/decision.json")
 
-          latest = json.loads(latest_path.read_text())
-          lifecycle = json.loads(lifecycle_path.read_text())
-          decisions = json.loads(decision_path.read_text())
+          latest = json.loads(
+              latest_path.read_text(encoding="utf-8")
+          )
 
-          # ---------------------------------------------------------
+          lifecycle = json.loads(
+              lifecycle_path.read_text(encoding="utf-8")
+          ) if lifecycle_path.exists() else {}
+
+          decisions = json.loads(
+              decision_path.read_text(encoding="utf-8")
+          ) if decision_path.exists() else {}
+
+          # =========================================================
           # DATA HEALTH
-          # ---------------------------------------------------------
+          # =========================================================
 
           if latest.get("ok") is not True:
               print("Paribu data invalid. No decision.")
@@ -69,24 +79,99 @@ jobs:
           )
 
           now = datetime.now(timezone.utc)
-          age_seconds = (now - fetched_dt).total_seconds()
+          age_seconds = (
+              now - fetched_dt
+          ).total_seconds()
 
           if age_seconds < -300:
               print("Future-dated snapshot. No decision.")
               raise SystemExit(0)
 
+          # Paribu runs on the established ~15m cadence.
+          # We tolerate normal scheduling/network delay,
+          # but do not make decisions from very old data.
           if age_seconds > 45 * 60:
-              print("Stale Paribu data. No decision.")
+              print(
+                  f"Stale Paribu data: "
+                  f"{age_seconds:.0f}s. No decision."
+              )
               raise SystemExit(0)
 
-          # ---------------------------------------------------------
-          # LOAD LAST EVENTS
-          # ---------------------------------------------------------
+          print("========================================")
+          print("ADAPTIVE DECISION ENGINE")
+          print("========================================")
+          print(f"Snapshot: {fetched_at}")
+          print(f"Snapshot age: {age_seconds:.0f}s")
+          print()
+
+          # =========================================================
+          # LOAD HISTORY
+          # =========================================================
+
+          snapshots = []
+
+          if history_dir.exists():
+
+              for path in sorted(
+                  history_dir.glob("*.jsonl")
+              ):
+
+                  try:
+                      for line in path.read_text(
+                          encoding="utf-8"
+                      ).splitlines():
+
+                          if not line.strip():
+                              continue
+
+                          try:
+                              snapshot = json.loads(line)
+                          except json.JSONDecodeError:
+                              continue
+
+                          snapshot_time = snapshot.get(
+                              "fetched_at"
+                          )
+
+                          if not snapshot_time:
+                              continue
+
+                          snapshots.append(snapshot)
+
+                  except OSError:
+                      continue
+
+          snapshots.sort(
+              key=lambda x: x.get(
+                  "fetched_at",
+                  ""
+              )
+          )
+
+          # Current snapshot must not be counted twice.
+          historical_snapshots = [
+              snapshot
+              for snapshot in snapshots
+              if snapshot.get("fetched_at") != fetched_at
+          ]
+
+          print(
+              "Historical snapshots:",
+              len(historical_snapshots)
+          )
+
+          # =========================================================
+          # LOAD EVENTS
+          # =========================================================
 
           events = []
 
           if events_path.exists():
-              for line in events_path.read_text().splitlines():
+
+              for line in events_path.read_text(
+                  encoding="utf-8"
+              ).splitlines():
+
                   if not line.strip():
                       continue
 
@@ -98,117 +183,486 @@ jobs:
           latest_events = {}
 
           for event in events:
+
               coin = event.get("coin")
+
               if coin in COINS:
-                  latest_events[coin] = event
 
-          # ---------------------------------------------------------
-          # BASIC MARKET EVIDENCE
-          # ---------------------------------------------------------
-
-          def get_market(market):
-              markets = latest.get("markets", {})
-              return markets.get(market)
-
-          def get_last(market_data):
-              try:
-                  return float(
-                      market_data["ticker"][0]["last"]
+                  event_time = event.get(
+                      "fetched_at"
                   )
-              except (KeyError, TypeError, ValueError):
+
+                  if (
+                      event_time is not None
+                      and event_time <= fetched_at
+                  ):
+                      latest_events[coin] = event
+
+          # =========================================================
+          # HELPERS
+          # =========================================================
+
+          def number(value):
+
+              try:
+                  return float(value)
+
+              except (
+                  TypeError,
+                  ValueError
+              ):
                   return None
 
-          def get_volume(market_data):
-              try:
-                  return float(
-                      market_data["ticker"][0]["volume"]
-                  )
-              except (KeyError, TypeError, ValueError):
+
+          def parse_time(value):
+
+              if not value:
                   return None
 
-          def orderbook_pressure(market_data):
-              """
-              Simple Paribu-side demand/supply observation.
+              try:
+                  return datetime.fromisoformat(
+                      value.replace("Z", "+00:00")
+                  ).astimezone(timezone.utc)
 
-              This is NOT a trade signal.
-              It only describes whether visible bid/ask liquidity
-              is currently heavier.
-              """
+              except (
+                  TypeError,
+                  ValueError
+              ):
+                  return None
+
+
+          def market_data(market):
+
+              return latest.get(
+                  "markets",
+                  {}
+              ).get(market)
+
+
+          def current_price(market):
+
+              data = market_data(market)
 
               try:
-                  bids = market_data["orderbook"]["bids"]
-                  asks = market_data["orderbook"]["asks"]
-
-                  bid_volume = sum(
-                      float(x[1]) for x in bids
+                  return number(
+                      data["ticker"][0]["last"]
                   )
 
-                  ask_volume = sum(
-                      float(x[1]) for x in asks
+              except (
+                  KeyError,
+                  TypeError,
+                  IndexError
+              ):
+                  return None
+
+
+          def current_volume(market):
+
+              data = market_data(market)
+
+              try:
+                  return number(
+                      data["ticker"][0]["volume"]
                   )
 
-                  total = bid_volume + ask_volume
+              except (
+                  KeyError,
+                  TypeError,
+                  IndexError
+              ):
+                  return None
+
+
+          def orderbook_pressure(market):
+
+              data = market_data(market)
+
+              try:
+
+                  bids = data[
+                      "orderbook"
+                  ]["bids"]
+
+                  asks = data[
+                      "orderbook"
+                  ]["asks"]
+
+                  bid_volume = 0.0
+                  ask_volume = 0.0
+
+                  for item in bids:
+
+                      price = number(item[0])
+                      quantity = number(item[1])
+
+                      if (
+                          price is not None
+                          and quantity is not None
+                      ):
+                          bid_volume += (
+                              price * quantity
+                          )
+
+                  for item in asks:
+
+                      price = number(item[0])
+                      quantity = number(item[1])
+
+                      if (
+                          price is not None
+                          and quantity is not None
+                      ):
+                          ask_volume += (
+                              price * quantity
+                          )
+
+                  total = (
+                      bid_volume
+                      + ask_volume
+                  )
 
                   if total <= 0:
                       return "unknown"
 
-                  bid_ratio = bid_volume / total
+                  ratio = (
+                      bid_volume / total
+                  )
 
-                  if bid_ratio >= 0.60:
+                  if ratio >= 0.60:
                       return "demand_heavy"
 
-                  if bid_ratio <= 0.40:
+                  if ratio <= 0.40:
                       return "supply_heavy"
 
                   return "balanced"
 
-              except (KeyError, TypeError, ValueError, IndexError):
+              except (
+                  KeyError,
+                  TypeError,
+                  IndexError,
+                  ValueError
+              ):
                   return "unknown"
 
-          # ---------------------------------------------------------
-          # DECISION LOGIC
-          # ---------------------------------------------------------
-          #
-          # IMPORTANT:
-          # This first version intentionally does NOT pretend to
-          # have Binance/OKX/news data.
-          #
-          # It creates a conservative Paribu-side decision candidate.
-          # Global confirmation will be added as a separate layer.
-          #
 
-          now_iso = datetime.now(timezone.utc).isoformat()
+          def historical_market_snapshots(
+              market
+          ):
+
+              result = []
+
+              for snapshot in historical_snapshots:
+
+                  try:
+                      market_item = snapshot[
+                          "markets"
+                      ][market]
+
+                      timestamp = snapshot.get(
+                          "fetched_at"
+                      )
+
+                      price = number(
+                          market_item.get(
+                              "last"
+                          )
+                      )
+
+                      if (
+                          timestamp
+                          and price is not None
+                      ):
+                          result.append({
+                              "timestamp": timestamp,
+                              "price": price,
+                          })
+
+                  except (
+                      KeyError,
+                      TypeError
+                  ):
+                      continue
+
+              return result
+
+
+          def nearest_price_before(
+              market_history,
+              target_dt,
+              tolerance_seconds
+          ):
+
+              best = None
+              best_gap = None
+
+              for item in market_history:
+
+                  dt = parse_time(
+                      item["timestamp"]
+                  )
+
+                  if dt is None:
+                      continue
+
+                  if dt > target_dt:
+                      continue
+
+                  gap = (
+                      target_dt - dt
+                  ).total_seconds()
+
+                  if gap > tolerance_seconds:
+                      continue
+
+                  if (
+                      best_gap is None
+                      or gap < best_gap
+                  ):
+                      best = item
+                      best_gap = gap
+
+              return best
+
+
+          def direction(value):
+
+              if value is None:
+                  return "UNKNOWN"
+
+              if value > 0:
+                  return "UP"
+
+              if value < 0:
+                  return "DOWN"
+
+              return "FLAT"
+
+
+          def price_direction(
+              current,
+              previous
+          ):
+
+              if (
+                  current is None
+                  or previous is None
+                  or previous == 0
+              ):
+                  return "UNKNOWN"
+
+              change = (
+                  (current - previous)
+                  / previous
+              )
+
+              return direction(change)
+
+
+          # =========================================================
+          # REVERSAL PERSISTENCE
+          #
+          # Rule established from the 19-21 Aug backtest:
+          #
+          # 1 snapshot  -> REVERSAL_CANDIDATE
+          # 2 consecutive snapshots (~30m)
+          #              -> REVERSAL_CONFIRMED
+          # 30m + 1h same direction
+          #              -> REVERSAL_STRONG
+          # 30m confirmed but 1h still opposite
+          #              -> REVERSAL_EARLY
+          #
+          # A candidate/early reversal MUST NOT by itself produce
+          # REDUCE_PROFIT.
+          # =========================================================
+
+          def reversal_status(
+              market,
+              current_price_value,
+              event_name
+          ):
+
+              if event_name not in {
+                  "momentum_reversal_up",
+                  "momentum_reversal_down",
+                  "REVERSAL_UP",
+                  "REVERSAL_DOWN",
+                  "reversal_up",
+                  "reversal_down",
+              }:
+                  return None
+
+              if event_name.lower().endswith(
+                  "reversal_up"
+              ):
+                  reversal_direction = "UP"
+
+              else:
+                  reversal_direction = "DOWN"
+
+              history = historical_market_snapshots(
+                  market
+              )
+
+              if not history:
+                  return {
+                      "status": "REVERSAL_CANDIDATE",
+                      "direction": reversal_direction,
+                      "one_hour_direction": "UNKNOWN",
+                      "confirmed": False,
+                      "strong": False,
+                  }
+
+              history = sorted(
+                  history,
+                  key=lambda x: x["timestamp"]
+              )
+
+              previous = history[-1]
+
+              previous_direction = price_direction(
+                  current_price_value,
+                  previous["price"]
+              )
+
+              if (
+                  previous_direction
+                  != reversal_direction
+              ):
+                  return {
+                      "status": "REVERSAL_CANDIDATE",
+                      "direction": reversal_direction,
+                      "one_hour_direction": "UNKNOWN",
+                      "confirmed": False,
+                      "strong": False,
+                  }
+
+              # Need the previous 15m move to also have
+              # the new direction.
+              previous_previous = (
+                  history[-2]
+                  if len(history) >= 2
+                  else None
+              )
+
+              if previous_previous is None:
+
+                  return {
+                      "status": "REVERSAL_CANDIDATE",
+                      "direction": reversal_direction,
+                      "one_hour_direction": "UNKNOWN",
+                      "confirmed": False,
+                      "strong": False,
+                  }
+
+              prior_direction = price_direction(
+                  previous["price"],
+                  previous_previous["price"]
+              )
+
+              if prior_direction != reversal_direction:
+
+                  return {
+                      "status": "REVERSAL_CANDIDATE",
+                      "direction": reversal_direction,
+                      "one_hour_direction": "UNKNOWN",
+                      "confirmed": False,
+                      "strong": False,
+                  }
+
+              # 30m confirmation achieved.
+              current_dt = fetched_dt
+
+              one_hour_target = (
+                  current_dt
+                  - timedelta(hours=1)
+              )
+
+              one_hour_reference = (
+                  nearest_price_before(
+                      history,
+                      one_hour_target,
+                      20 * 60
+                  )
+              )
+
+              if one_hour_reference is None:
+
+                  return {
+                      "status": "REVERSAL_CONFIRMED",
+                      "direction": reversal_direction,
+                      "one_hour_direction": "UNKNOWN",
+                      "confirmed": True,
+                      "strong": False,
+                  }
+
+              one_hour_direction = price_direction(
+                  current_price_value,
+                  one_hour_reference["price"]
+              )
+
+              if (
+                  one_hour_direction
+                  == reversal_direction
+              ):
+
+                  return {
+                      "status": "REVERSAL_STRONG",
+                      "direction": reversal_direction,
+                      "one_hour_direction": one_hour_direction,
+                      "confirmed": True,
+                      "strong": True,
+                  }
+
+              return {
+                  "status": "REVERSAL_EARLY",
+                  "direction": reversal_direction,
+                  "one_hour_direction": one_hour_direction,
+                  "confirmed": True,
+                  "strong": False,
+              }
+
+
+          # =========================================================
+          # DECISION ENGINE
+          # =========================================================
+
+          now_iso = datetime.now(
+              timezone.utc
+          ).isoformat()
 
           for coin, market in COINS.items():
 
-              market_data = get_market(market)
+              market_item = market_data(
+                  market
+              )
 
-              if not market_data:
-                  print(f"{coin}: market data unavailable")
+              if not market_item:
+                  print(
+                      f"{coin}: market data unavailable"
+                  )
                   continue
 
-              price = get_last(market_data)
-              volume = get_volume(market_data)
-              pressure = orderbook_pressure(market_data)
+              price = current_price(
+                  market
+              )
+
+              volume = current_volume(
+                  market
+              )
+
+              pressure = orderbook_pressure(
+                  market
+              )
 
               if price is None:
-                  print(f"{coin}: invalid price")
+                  print(
+                      f"{coin}: invalid price"
+                  )
                   continue
 
-              event = latest_events.get(coin)
-
-              previous_decision = decisions.get(
-                  coin,
-                  {}
-              ).get("decision", "NONE")
-
-              lifecycle_state = lifecycle.get(
-                  coin,
-                  {}
-              ).get("state", "UNKNOWN")
-
-              decision = "NONE"
-              reason = "No sufficiently strong Paribu-side evidence."
+              event = latest_events.get(
+                  coin
+              )
 
               event_name = (
                   event.get("event")
@@ -216,112 +670,290 @@ jobs:
                   else None
               )
 
-              # -----------------------------------------------------
-              # UPWARD CASE
-              # -----------------------------------------------------
+              lifecycle_state = lifecycle.get(
+                  coin,
+                  {}
+              ).get(
+                  "state",
+                  "UNKNOWN"
+              )
 
-              upward_event = event_name in {
-                  "structural_expansion_up",
-                  "momentum_acceleration_up",
+              previous_decision = decisions.get(
+                  coin,
+                  {}
+              )
+
+              decision = "NONE"
+
+              reason = (
+                  "Yeni anlamlı event bulunmadı."
+              )
+
+              lifecycle_signal = None
+
+              # =====================================================
+              # REVERSAL GATE
+              # =====================================================
+
+              if event_name in {
                   "momentum_reversal_up",
-              }
-
-              downward_event = event_name in {
-                  "structural_expansion_down",
-                  "momentum_acceleration_down",
                   "momentum_reversal_down",
-              }
+                  "REVERSAL_UP",
+                  "REVERSAL_DOWN",
+                  "reversal_up",
+                  "reversal_down",
+              }:
 
-              if upward_event:
+                  lifecycle_signal = (
+                      reversal_status(
+                          market,
+                          price,
+                          event_name
+                      )
+                  )
 
-                  if pressure == "demand_heavy":
-                      decision = "ADD_CONSIDER"
+                  status = (
+                      lifecycle_signal["status"]
+                  )
+
+                  direction_value = (
+                      lifecycle_signal["direction"]
+                  )
+
+                  one_hour_direction = (
+                      lifecycle_signal[
+                          "one_hour_direction"
+                      ]
+                  )
+
+                  if status == "REVERSAL_CANDIDATE":
+
+                      decision = "WAIT"
+
                       reason = (
-                          "Yukarı yönlü event ile birlikte "
-                          "Paribu order book görünür talep "
-                          "ağırlığını destekliyor."
+                          "Reversal adayı oluştu ancak "
+                          "30 dakikalık persistence "
+                          "teyidi henüz yok."
                       )
 
-                  elif pressure == "supply_heavy":
+                  elif status == "REVERSAL_EARLY":
+
                       decision = "WAIT"
+
                       reason = (
-                          "Yukarı yönlü event var ancak "
-                          "görünür arz baskısı hareketi "
-                          "zayıflatıyor."
+                          "Reversal 30 dakika teyitli "
+                          "ancak 1 saatlik yön henüz "
+                          "aynı yönde değil."
                       )
 
-                  else:
+                  elif status == "REVERSAL_CONFIRMED":
+
                       decision = "WAIT"
+
                       reason = (
-                          "Yukarı yönlü event mevcut ancak "
-                          "Paribu tarafında yeterli arz-talep "
+                          "Reversal 30 dakika teyitli; "
+                          "ancak 1 saatlik global trend "
                           "teyidi yok."
                       )
 
-              # -----------------------------------------------------
-              # DOWNWARD CASE
-              # -----------------------------------------------------
+                  elif status == "REVERSAL_STRONG":
 
-              elif downward_event:
+                      if (
+                          direction_value == "DOWN"
+                          and pressure
+                          == "supply_heavy"
+                      ):
 
-                  if pressure == "supply_heavy":
-                      decision = "REDUCE_PROFIT"
+                          decision = (
+                              "REDUCE_PROFIT"
+                          )
+
+                          reason = (
+                              "Reversal 30 dakika teyitli "
+                              "ve 1 saatlik yön de aşağı. "
+                              "Paribu order book arz baskısını "
+                              "destekliyor."
+                          )
+
+                      elif (
+                          direction_value == "UP"
+                          and pressure
+                          == "demand_heavy"
+                      ):
+
+                          decision = (
+                              "ADD_CONSIDER"
+                          )
+
+                          reason = (
+                              "Reversal 30 dakika teyitli "
+                              "ve 1 saatlik yön de yukarı. "
+                              "Paribu order book talep baskısını "
+                              "destekliyor."
+                          )
+
+                      else:
+
+                          decision = "WAIT"
+
+                          reason = (
+                              "Reversal güçlü teyitli ancak "
+                              "Paribu order book tarafında "
+                              "yeterli ek teyit yok."
+                          )
+
+              # =====================================================
+              # NON-REVERSAL EVENTS
+              # =====================================================
+
+              elif event_name in {
+                  "structural_expansion_up",
+                  "EXPANSION_UP",
+                  "expansion_up",
+              }:
+
+                  if pressure == "demand_heavy":
+
+                      decision = "ADD_CONSIDER"
+
                       reason = (
-                          "Aşağı yönlü event ile birlikte "
-                          "Paribu order book görünür arz "
-                          "ağırlığını gösteriyor."
-                      )
-
-                  elif pressure == "demand_heavy":
-                      decision = "WAIT"
-                      reason = (
-                          "Aşağı yönlü event mevcut ancak "
-                          "güçlü görünür talep düşüşü "
-                          "absorbe ediyor olabilir."
+                          "Yukarı yönlü yapısal genişleme "
+                          "ve görünür talep baskısı birlikte."
                       )
 
                   else:
+
                       decision = "WAIT"
+
                       reason = (
-                          "Aşağı yönlü event mevcut ancak "
-                          "Paribu tarafında yeterli teyit yok."
+                          "Yukarı yönlü yapısal genişleme "
+                          "var ancak Paribu talep teyidi "
+                          "yeterli değil."
                       )
 
-              # -----------------------------------------------------
+              elif event_name in {
+                  "structural_expansion_down",
+                  "EXPANSION_DOWN",
+                  "expansion_down",
+              }:
+
+                  if pressure == "supply_heavy":
+
+                      decision = "REDUCE_PROFIT"
+
+                      reason = (
+                          "Aşağı yönlü yapısal genişleme "
+                          "ve görünür arz baskısı birlikte."
+                      )
+
+                  else:
+
+                      decision = "WAIT"
+
+                      reason = (
+                          "Aşağı yönlü yapısal genişleme "
+                          "var ancak Paribu arz teyidi "
+                          "yeterli değil."
+                      )
+
+              elif event_name in {
+                  "PARTICIPATION_EXPANSION_UP",
+                  "participation_expansion_up",
+              }:
+
+                  decision = "WAIT"
+
+                  reason = (
+                      "Katılım artışı yukarı yönlü "
+                      "hareketi destekliyor ancak "
+                      "tek başına ek alım sinyali değil."
+                  )
+
+              elif event_name in {
+                  "PARTICIPATION_EXPANSION_DOWN",
+                  "participation_expansion_down",
+              }:
+
+                  decision = "WAIT"
+
+                  reason = (
+                      "Katılım artışı aşağı yönlü "
+                      "hareketi destekliyor ancak "
+                      "tek başına kâr realizasyonu sinyali değil."
+                  )
+
+              elif event_name in {
+                  "DEMAND_SUPPORT",
+                  "demand_support",
+              }:
+
+                  decision = "WAIT"
+
+                  reason = (
+                      "Talep desteği mevcut; "
+                      "tek başına işlem kararı üretmiyor."
+                  )
+
+              elif event_name in {
+                  "SUPPLY_PRESSURE",
+                  "supply_pressure",
+              }:
+
+                  decision = "WAIT"
+
+                  reason = (
+                      "Arz baskısı mevcut; "
+                      "tek başına işlem kararı üretmiyor."
+                  )
+
+              # =====================================================
               # NO EVENT
-              # -----------------------------------------------------
+              # =====================================================
 
               else:
+
                   decision = "NONE"
+
                   reason = (
                       "Yeni anlamlı event bulunmadı."
                   )
 
-              # -----------------------------------------------------
+              # =====================================================
               # PUSH KEY
-              # -----------------------------------------------------
+              # =====================================================
+
+              lifecycle_key = lifecycle_state
+
+              if lifecycle_signal is not None:
+
+                  lifecycle_key = (
+                      lifecycle_signal["status"]
+                  )
 
               push_key = (
                   f"{coin}|"
                   f"{event_name}|"
-                  f"{lifecycle_state}|"
+                  f"{lifecycle_key}|"
                   f"{decision}"
               )
 
-              previous_push_key = decisions.get(
-                  coin,
-                  {}
-              ).get("last_push_key")
+              previous_push_key = (
+                  previous_decision.get(
+                      "last_push_key"
+                  )
+              )
 
-              # -----------------------------------------------------
-              # UPDATE DECISION STATE
-              # -----------------------------------------------------
+              # =====================================================
+              # WRITE DECISION STATE
+              # =====================================================
 
               decisions[coin] = {
                   "decision": decision,
                   "last_decision_at": now_iso,
                   "last_event": event_name,
-                  "last_lifecycle_state": lifecycle_state,
+                  "last_lifecycle_state": (
+                      lifecycle_key
+                  ),
                   "last_push_key": (
                       push_key
                       if decision != "NONE"
@@ -331,53 +963,61 @@ jobs:
                   "price": price,
                   "volume": volume,
                   "orderbook_pressure": pressure,
-                  "global_status": "NOT_CONNECTED_YET",
+                  "global_status": (
+                      "NOT_CONNECTED_YET"
+                  ),
               }
 
-              # -----------------------------------------------------
-              # OUTPUT
-              # -----------------------------------------------------
+              # =====================================================
+              # LOG
+              # =====================================================
 
               if decision == "NONE":
+
                   print(
                       f"{coin}: SILENT | "
                       f"{reason}"
                   )
+
                   continue
 
-              if push_key == previous_push_key:
+              if (
+                  push_key
+                  == previous_push_key
+              ):
+
                   print(
                       f"{coin}: SAME DECISION / "
                       f"SILENT | {decision}"
                   )
+
                   continue
 
               print(
                   f"{coin}: NEW DECISION | "
                   f"{decision} | "
                   f"event={event_name} | "
-                  f"state={lifecycle_state} | "
+                  f"lifecycle={lifecycle_key} | "
                   f"pressure={pressure}"
               )
 
-          # ---------------------------------------------------------
+          # =========================================================
           # WRITE
-          # ---------------------------------------------------------
+          # =========================================================
 
           decision_path.write_text(
               json.dumps(
                   decisions,
                   indent=2,
                   ensure_ascii=False
-              ) + "\n"
+              ) + "\n",
+              encoding="utf-8"
           )
 
-          print("================================")
-          print("Adaptive Decision Engine")
-          print("================================")
-          print(f"Snapshot: {fetched_at}")
-          print(f"Snapshot age: {age_seconds:.0f}s")
+          print()
+          print("========================================")
           print("Decision state updated.")
+          print("========================================")
 
       - name: Commit decision state
         shell: bash
@@ -394,5 +1034,5 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Add adaptive decision engine"
+          git commit -m "Add reversal persistence gate"
           git push origin HEAD:main
