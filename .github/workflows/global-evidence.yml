@@ -308,12 +308,15 @@ jobs:
                 .data[0] as $d |
                 {
                   available: true,
-                  symbol: ($d.instId // null),
-                  price: (($d.last // "0") | tonumber),
 
-                  change_24h_pct:
-                    if ($d.open24h // "") != ""
-                    then
+                  symbol: ($d.instId // null),
+
+                  price: (
+                    ($d.last // "0") | tonumber
+                  ),
+
+                  change_24h_pct: (
+                    if ($d.open24h // "") != "" then
                       (
                         (
                           ($d.last | tonumber)
@@ -325,21 +328,26 @@ jobs:
                       ) * 100
                     else
                       null
-                    end,
+                    end
+                  ),
 
-                  volume_24h:
-                    if ($d.vol24h // "") != ""
-                    then ($d.vol24h | tonumber)
-                    else null
-                    end,
+                  volume_24h: (
+                    if ($d.vol24h // "") != "" then
+                      ($d.vol24h | tonumber)
+                    else
+                      null
+                    end
+                  ),
 
                   quote_volume_24h: null,
 
-                  timestamp_ms:
-                    if ($d.ts // "") != ""
-                    then ($d.ts | tonumber)
-                    else null
+                  timestamp_ms: (
+                    if ($d.ts // "") != "" then
+                      ($d.ts | tonumber)
+                    else
+                      null
                     end
+                  )
                 }
               end
             ' <<< "$raw"
@@ -361,27 +369,31 @@ jobs:
 
           global_source_health() {
             local raw="$1"
-            local exchange="$2"
 
-            jq -c --arg exchange "$exchange" --argjson now "$current_epoch" '
+            jq -c \
+              --argjson now "$current_epoch" \
+              '
               if .available != true then
                 {
                   available: false,
                   freshness: "unavailable",
                   age_seconds: null
                 }
+
               elif .timestamp_ms == null then
                 {
                   available: true,
                   freshness: "unknown",
                   age_seconds: null
                 }
+
               else
                 (.timestamp_ms / 1000 | floor) as $ts |
                 ($now - $ts) as $age |
 
                 {
                   available: true,
+
                   freshness:
                     if $age <= 300 then
                       "fresh"
@@ -392,22 +404,28 @@ jobs:
                     else
                       "stale"
                     end,
+
                   age_seconds:
-                    if $age < 0 then 0 else $age end
+                    if $age < 0 then
+                      0
+                    else
+                      $age
+                    end
                 }
               end
-            ' <<< "$raw"
+              '
+            <<< "$raw"
           }
 
-          bv_health="$(global_source_health "$bv" "Binance")"
-          bf_health="$(global_source_health "$bf" "Binance")"
-          bk_health="$(global_source_health "$bk" "Binance")"
-          bb_health="$(global_source_health "$bb" "Binance")"
+          bv_health="$(global_source_health "$bv")"
+          bf_health="$(global_source_health "$bf")"
+          bk_health="$(global_source_health "$bk")"
+          bb_health="$(global_source_health "$bb")"
 
-          ov_health="$(global_source_health "$ov" "OKX")"
-          of_health="$(global_source_health "$of" "OKX")"
-          ok_health="$(global_source_health "$ok" "OKX")"
-          ob_health="$(global_source_health "$ob" "OKX")"
+          ov_health="$(global_source_health "$ov")"
+          of_health="$(global_source_health "$of")"
+          ok_health="$(global_source_health "$ok")"
+          ob_health="$(global_source_health "$ob")"
 
           echo "Binance VIRTUAL health: ${bv_health}"
           echo "Binance FET health: ${bf_health}"
@@ -470,22 +488,27 @@ jobs:
 
             def global_direction($a; $b):
               if usable_change($a) and usable_change($b) then
+
                 if
                   ($a.change_24h_pct > 0.25)
                   and
                   ($b.change_24h_pct > 0.25)
                 then
                   "up"
+
                 elif
                   ($a.change_24h_pct < -0.25)
                   and
                   ($b.change_24h_pct < -0.25)
                 then
                   "down"
+
                 else
                   "mixed"
                 end
+
               elif usable_change($a) then
+
                 if $a.change_24h_pct > 0.25 then
                   "up"
                 elif $a.change_24h_pct < -0.25 then
@@ -493,7 +516,9 @@ jobs:
                 else
                   "flat"
                 end
+
               elif usable_change($b) then
+
                 if $b.change_24h_pct > 0.25 then
                   "up"
                 elif $b.change_24h_pct < -0.25 then
@@ -501,6 +526,7 @@ jobs:
                 else
                   "flat"
                 end
+
               else
                 "unknown"
               end;
@@ -524,41 +550,41 @@ jobs:
                 $h.freshness == "stale_warning"
               );
 
+            def directional($direction):
+              (
+                $direction == "up"
+                or
+                $direction == "down"
+              );
+
             def confidence(
-              $binance;
-              $okx;
+              $binance_health;
+              $okx_health;
               $agreement_value;
               $direction_value;
-              $btc
+              $btc_available
             ):
+
               if
-                source_fresh($binance)
-                and source_fresh($okx)
+                source_fresh($binance_health)
+                and source_fresh($okx_health)
                 and $agreement_value
-                and
-                (
-                  $direction_value == "up"
-                  or
-                  $direction_value == "down"
-                )
-                and
-                $btc
+                and directional($direction_value)
+                and $btc_available
               then
                 "HIGH"
+
               elif
                 (
-                  source_fresh($binance)
+                  source_fresh($binance_health)
                   or
-                  source_fresh($okx)
+                  source_fresh($okx_health)
                 )
                 and
-                (
-                  $direction_value == "up"
-                  or
-                  $direction_value == "down"
-                )
+                directional($direction_value)
               then
                 "MEDIUM"
+
               else
                 "LOW"
               end;
@@ -574,6 +600,7 @@ jobs:
               },
 
               source_health: {
+
                 paribu: {
                   available: ($paribu_freshness != "stale"),
                   fetched_at: $paribu_fetched_at,
@@ -582,18 +609,22 @@ jobs:
                 },
 
                 binance: {
+
                   VIRTUAL: {
                     status: $bv_status,
                     health: $bv_health
                   },
+
                   FET: {
                     status: $bf_status,
                     health: $bf_health
                   },
+
                   KITE: {
                     status: $bk_status,
                     health: $bk_health
                   },
+
                   BTC: {
                     status: $bb_status,
                     health: $bb_health
@@ -601,18 +632,22 @@ jobs:
                 },
 
                 okx: {
+
                   VIRTUAL: {
                     status: $ov_status,
                     health: $ov_health
                   },
+
                   FET: {
                     status: $of_status,
                     health: $of_health
                   },
+
                   KITE: {
                     status: $ok_status,
                     health: $ok_health
                   },
+
                   BTC: {
                     status: $ob_status,
                     health: $ob_health
@@ -628,20 +663,29 @@ jobs:
               },
 
               coins: {
+
                 VIRTUAL: {
+
                   local: {
                     exchange: "Paribu",
                     quote_currency: "TRY",
                     price: $pv,
                     volume_24h: $pvv
                   },
+
                   global: {
                     binance: $bv,
                     okx: $ov
                   },
+
                   relationship: {
-                    global_direction: global_direction($bv; $ov),
-                    cross_exchange_agreement: agreement($bv; $ov),
+
+                    global_direction:
+                      global_direction($bv; $ov),
+
+                    cross_exchange_agreement:
+                      agreement($bv; $ov),
+
                     global_confidence:
                       confidence(
                         $bv_health;
@@ -658,19 +702,27 @@ jobs:
                 },
 
                 FET: {
+
                   local: {
                     exchange: "Paribu",
                     quote_currency: "TRY",
                     price: $pf,
                     volume_24h: $pfv
                   },
+
                   global: {
                     binance: $bf,
                     okx: $of
                   },
+
                   relationship: {
-                    global_direction: global_direction($bf; $of),
-                    cross_exchange_agreement: agreement($bf; $of),
+
+                    global_direction:
+                      global_direction($bf; $of),
+
+                    cross_exchange_agreement:
+                      agreement($bf; $of),
+
                     global_confidence:
                       confidence(
                         $bf_health;
@@ -687,19 +739,27 @@ jobs:
                 },
 
                 KITE: {
+
                   local: {
                     exchange: "Paribu",
                     quote_currency: "TRY",
                     price: $pk,
                     volume_24h: $pkv
                   },
+
                   global: {
                     binance: $bk,
                     okx: $ok
                   },
+
                   relationship: {
-                    global_direction: global_direction($bk; $ok),
-                    cross_exchange_agreement: agreement($bk; $ok),
+
+                    global_direction:
+                      global_direction($bk; $ok),
+
+                    cross_exchange_agreement:
+                      agreement($bk; $ok),
+
                     global_confidence:
                       confidence(
                         $bk_health;
