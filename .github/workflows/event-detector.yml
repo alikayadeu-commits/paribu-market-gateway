@@ -6,6 +6,7 @@ on:
       - "Paribu Market Data"
     types:
       - completed
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -16,7 +17,10 @@ concurrency:
 
 jobs:
   detect:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
     runs-on: ubuntu-latest
 
     steps:
@@ -27,7 +31,6 @@ jobs:
         shell: python
         run: |
           import json
-          import statistics
           from pathlib import Path
           from datetime import datetime, timezone
 
@@ -38,371 +41,517 @@ jobs:
           }
 
           latest_path = Path("data/latest.json")
-          state_path = Path("state/lifecycle.json")
+          history_dir = Path("history")
           events_path = Path("state/events.jsonl")
+          lifecycle_path = Path("state/lifecycle.json")
 
           latest = json.loads(latest_path.read_text())
-          states = json.loads(state_path.read_text())
 
           if latest.get("ok") is not True:
-              raise SystemExit("Invalid Paribu snapshot: ok != true")
+              print("Invalid Paribu snapshot. Nothing to detect.")
+              raise SystemExit(0)
 
           fetched_at = latest.get("fetched_at")
 
           if not fetched_at:
-              raise SystemExit("Missing fetched_at")
-
-          now = datetime.now(timezone.utc)
+              print("Missing fetched_at. Nothing to detect.")
+              raise SystemExit(0)
 
           fetched_dt = datetime.fromisoformat(
               fetched_at.replace("Z", "+00:00")
           )
 
+          now = datetime.now(timezone.utc)
           age_seconds = (now - fetched_dt).total_seconds()
 
           if age_seconds < -300:
-              raise SystemExit("Future-dated Paribu snapshot")
+              print("Future-dated snapshot. Nothing to detect.")
+              raise SystemExit(0)
 
           if age_seconds > 45 * 60:
-              print("Paribu snapshot is stale. No event evaluation.")
+              print(
+                  f"Stale Paribu snapshot: {age_seconds:.0f}s. "
+                  "Nothing to detect."
+              )
               raise SystemExit(0)
 
           # ---------------------------------------------------------
-          # LOAD HISTORY
+          # HISTORY
           # ---------------------------------------------------------
 
-          history_files = sorted(
-              Path("history").glob("*.jsonl"),
-              reverse=True
-          )
+          snapshots = []
 
-          history = []
-
-          for file in history_files:
-              lines = file.read_text().splitlines()
-
-              for line in reversed(lines):
+          for path in sorted(history_dir.glob("*.jsonl")):
+              for line in path.read_text().splitlines():
                   if not line.strip():
                       continue
 
                   try:
-                      row = json.loads(line)
+                      snapshots.append(json.loads(line))
                   except json.JSONDecodeError:
                       continue
 
-                  history.append(row)
+          snapshots.sort(
+              key=lambda x: x.get("fetched_at", "")
+          )
 
-                  if len(history) >= 240:
-                      break
+          # Remove duplicate current snapshot if the workflow
+          # has been manually re-run.
+          snapshots = [
+              x for x in snapshots
+              if x.get("fetched_at") != fetched_at
+          ]
 
-              if len(history) >= 240:
-                  break
+          previous = snapshots[-1] if snapshots else None
 
-          history.reverse()
+          # ---------------------------------------------------------
+          # HELPERS
+          # ---------------------------------------------------------
 
-          def get_prices(market):
-              values = []
+          def number(value):
+              try:
+                  return float(value)
+              except (TypeError, ValueError):
+                  return None
 
-              for row in history:
+          def current_market(market):
+              return latest.get("markets", {}).get(market)
+
+          def current_price(market):
+              data = current_market(market)
+
+              try:
+                  return number(data["ticker"][0]["last"])
+              except (KeyError, TypeError, IndexError):
+                  return None
+
+          def current_volume(market):
+              data = current_market(market)
+
+              try:
+                  return number(data["ticker"][0]["volume"])
+              except (KeyError, TypeError, IndexError):
+                  return None
+
+          def current_orderbook_pressure(market):
+              data = current_market(market)
+
+              try:
+                  bids = data["orderbook"]["bids"]
+                  asks = data["orderbook"]["asks"]
+
+                  bid_value = sum(
+                      number(x[0]) * number(x[1])
+                      for x in bids
+                      if number(x[0]) is not None
+                      and number(x[1]) is not None
+                  )
+
+                  ask_value = sum(
+                      number(x[0]) * number(x[1])
+                      for x in asks
+                      if number(x[0]) is not None
+                      and number(x[1]) is not None
+                  )
+
+                  total = bid_value + ask_value
+
+                  if total <= 0:
+                      return "unknown"
+
+                  ratio = bid_value / total
+
+                  if ratio >= 0.60:
+                      return "demand_heavy"
+
+                  if ratio <= 0.40:
+                      return "supply_heavy"
+
+                  return "balanced"
+
+              except (KeyError, TypeError, IndexError):
+                  return "unknown"
+
+          def historical_coin_snapshots(market):
+              result = []
+
+              for snapshot in snapshots:
                   try:
-                      value = float(
-                          row["markets"][market]["last"]
-                      )
-                      values.append(value)
-                  except (KeyError, TypeError, ValueError):
+                      coin = snapshot["markets"][market]
+                      result.append(coin)
+                  except KeyError:
                       continue
 
-              return values
+              return result
 
-          def pct_change(a, b):
-              if a is None or a <= 0:
+          # ---------------------------------------------------------
+          # ADAPTIVE EVENT CLASSIFICATION
+          # ---------------------------------------------------------
+          #
+          # This detector does NOT decide whether to buy or sell.
+          #
+          # It detects meaningful changes in market behaviour.
+          #
+          # No fixed confirmation count.
+          # No fixed waiting period.
+          # No pullback/breakout price zones.
+          #
+          # The Decision Engine performs the investment interpretation.
+          # ---------------------------------------------------------
+
+          def detect_event(coin, market):
+              price = current_price(market)
+              volume = current_volume(market)
+              pressure = current_orderbook_pressure(market)
+
+              if price is None:
                   return None
-              return (b / a) - 1
 
-          # ---------------------------------------------------------
-          # EVENT CLASSIFICATION
-          # ---------------------------------------------------------
+              hist = historical_coin_snapshots(market)
 
-          events = []
+              if not hist:
+                  return {
+                      "event": "INITIAL_OBSERVATION",
+                      "decision_relevant": False,
+                      "global_validation_required": False,
+                      "push_candidate": False,
+                      "reason": "İlk kullanılabilir gözlem.",
+                  }
 
-          for coin, market in COINS.items():
+              last = hist[-1]
 
-              current = latest["markets"][market]["ticker"][0]
-              price = float(current["last"])
+              previous_price = number(last.get("last"))
+              previous_volume = number(last.get("volume"))
+              previous_high = number(last.get("high"))
+              previous_low = number(last.get("low"))
 
-              prices = get_prices(market)
+              if previous_price in (None, 0):
+                  return None
 
-              # History already contains the current snapshot.
-              # Therefore the previous snapshot is [-2], not [-1].
-              if len(prices) < 3:
-                  print(f"{coin}: insufficient history")
-                  continue
-
-              previous_price = prices[-2]
-
-              current_change = pct_change(
-                  previous_price,
-                  price
+              price_change = (
+                  (price - previous_price)
+                  / previous_price
+                  * 100
               )
 
-              if current_change is None:
-                  continue
+              volume_change = None
 
-              # -----------------------------------------------------
-              # Adaptive reference set
-              # -----------------------------------------------------
-              #
-              # No fixed timeframe is imposed.
-              # The detector uses the available history and adapts
-              # the effective reference window to the amount of data.
-              #
-
-              available = len(prices) - 1
-
-              if available < 6:
-                  reference = prices[:-1]
-              else:
-                  dynamic_window = max(
-                      6,
-                      min(
-                          available,
-                          max(6, available // 3)
-                      )
+              if previous_volume not in (None, 0) and volume is not None:
+                  volume_change = (
+                      (volume - previous_volume)
+                      / abs(previous_volume)
+                      * 100
                   )
 
-                  reference = prices[-(dynamic_window + 1):-1]
+              # -----------------------------------------------------
+              # Recent structural context
+              # -----------------------------------------------------
 
-              if len(reference) < 3:
-                  continue
+              recent = hist[-8:]
 
-              reference_returns = []
+              recent_prices = [
+                  number(x.get("last"))
+                  for x in recent
+                  if number(x.get("last")) is not None
+              ]
 
-              for i in range(1, len(reference)):
-                  change = pct_change(
-                      reference[i - 1],
-                      reference[i]
-                  )
+              recent_highs = [
+                  number(x.get("high"))
+                  for x in recent
+                  if number(x.get("high")) is not None
+              ]
 
-                  if change is not None:
-                      reference_returns.append(change)
+              recent_lows = [
+                  number(x.get("low"))
+                  for x in recent
+                  if number(x.get("low")) is not None
+              ]
 
-              if not reference_returns:
-                  continue
+              if not recent_prices:
+                  return None
 
-              median_return = statistics.median(
-                  reference_returns
+              recent_high = max(recent_highs) if recent_highs else None
+              recent_low = min(recent_lows) if recent_lows else None
+
+              # -----------------------------------------------------
+              # Directional context
+              # -----------------------------------------------------
+
+              earlier_price = (
+                  recent_prices[0]
+                  if len(recent_prices) >= 2
+                  else previous_price
               )
 
-              median_abs_return = statistics.median(
-                  abs(x) for x in reference_returns
+              recent_move = (
+                  (price - earlier_price)
+                  / earlier_price
+                  * 100
               )
 
               # -----------------------------------------------------
-              # Adaptive structure
+              # Event classification
               # -----------------------------------------------------
-
-              reference_high = max(reference)
-              reference_low = min(reference)
 
               event = None
               reason = None
+              decision_relevant = False
+              global_required = False
+              push_candidate = False
 
-              # 1. Structural expansion
-              if price > reference_high and current_change > 0:
-                  event = "structural_expansion_up"
+              # Strong upward structural behaviour.
+              if (
+                  recent_high is not None
+                  and price > recent_high
+                  and recent_move > 0
+              ):
+                  event = "EXPANSION_UP"
                   reason = (
-                      "Fiyat mevcut adaptif referans yapısının "
-                      "üzerine çıkarak yukarı genişledi."
+                      "Fiyat yakın tarihsel yapının üzerine çıkarak "
+                      "yukarı yönlü genişleme gösteriyor."
                   )
+                  decision_relevant = True
+                  global_required = True
+                  push_candidate = True
 
-              elif price < reference_low and current_change < 0:
-                  event = "structural_expansion_down"
+              # Strong downward structural behaviour.
+              elif (
+                  recent_low is not None
+                  and price < recent_low
+                  and recent_move < 0
+              ):
+                  event = "EXPANSION_DOWN"
                   reason = (
-                      "Fiyat mevcut adaptif referans yapısının "
-                      "altına çıkarak aşağı genişledi."
+                      "Fiyat yakın tarihsel yapının altına çıkarak "
+                      "aşağı yönlü genişleme gösteriyor."
                   )
+                  decision_relevant = True
+                  global_required = True
+                  push_candidate = True
 
-              # 2. Momentum acceleration
-              if event is None and median_abs_return > 0:
-
-                  acceleration_ratio = (
-                      abs(current_change)
-                      / median_abs_return
+              # Momentum reversal.
+              elif (
+                  previous_price is not None
+                  and price_change > 0
+                  and recent_move < 0
+              ):
+                  event = "REVERSAL_UP"
+                  reason = (
+                      "Önceki zayıflık sonrasında fiyat yönü yukarı "
+                      "dönüyor."
                   )
+                  decision_relevant = True
+                  global_required = True
+                  push_candidate = True
 
-                  if acceleration_ratio >= 2.5:
-
-                      if current_change > 0:
-                          event = "momentum_acceleration_up"
-                          reason = (
-                              "Güncel hareket, yakın dönem "
-                              "normal hareketliliğinin belirgin "
-                              "şekilde üzerine çıktı."
-                          )
-
-                      elif current_change < 0:
-                          event = "momentum_acceleration_down"
-                          reason = (
-                              "Güncel düşüş, yakın dönem "
-                              "normal hareketliliğinin belirgin "
-                              "şekilde üzerine çıktı."
-                          )
-
-              # 3. Directional reversal
-              if event is None and len(reference_returns) >= 3:
-
-                  positive_pressure = sum(
-                      1 for x in reference_returns
-                      if x > 0
+              elif (
+                  previous_price is not None
+                  and price_change < 0
+                  and recent_move > 0
+              ):
+                  event = "REVERSAL_DOWN"
+                  reason = (
+                      "Önceki güçlenme sonrasında fiyat yönü aşağı "
+                      "dönüyor."
                   )
+                  decision_relevant = True
+                  global_required = True
+                  push_candidate = True
 
-                  negative_pressure = sum(
-                      1 for x in reference_returns
-                      if x < 0
-                  )
-
-                  if (
-                      positive_pressure > negative_pressure
-                      and current_change < 0
-                  ):
-                      event = "momentum_reversal_down"
+              # Participation change.
+              elif (
+                  volume_change is not None
+                  and abs(volume_change) >= 25
+                  and abs(price_change) >= 0.5
+              ):
+                  if price_change > 0:
+                      event = "PARTICIPATION_EXPANSION_UP"
                       reason = (
-                          "Önceki yönlü baskı zayıflarken "
-                          "güncel fiyat hareketi aşağı döndü."
+                          "Fiyat hareketine belirgin katılım artışı "
+                          "eşlik ediyor."
+                      )
+                  else:
+                      event = "PARTICIPATION_EXPANSION_DOWN"
+                      reason = (
+                          "Aşağı yönlü fiyat hareketine belirgin "
+                          "katılım artışı eşlik ediyor."
                       )
 
-                  elif (
-                      negative_pressure > positive_pressure
-                      and current_change > 0
-                  ):
-                      event = "momentum_reversal_up"
-                      reason = (
-                          "Önceki yönlü baskı zayıflarken "
-                          "güncel fiyat hareketi yukarı döndü."
-                      )
+                  decision_relevant = True
+                  global_required = True
+                  push_candidate = True
 
-              # 4. No meaningful event
-              if event is None:
-                  continue
+              # Demand / supply regime change.
+              elif pressure == "demand_heavy" and price_change > 0:
+                  event = "DEMAND_SUPPORT"
+                  reason = (
+                      "Pozitif fiyat hareketi sırasında görünür "
+                      "alış likiditesi baskın."
+                  )
+                  decision_relevant = True
+                  global_required = True
+                  push_candidate = False
 
-              previous_state = (
-                  states.get(coin, {})
-                  .get("state", "UNKNOWN")
-              )
-
-              # -----------------------------------------------------
-              # Lifecycle state
-              # -----------------------------------------------------
-
-              if event == "structural_expansion_up":
-                  current_state = "EXPANSION_UP"
-
-              elif event == "structural_expansion_down":
-                  current_state = "EXPANSION_DOWN"
-
-              elif event == "momentum_acceleration_up":
-                  current_state = "ACCELERATION_UP"
-
-              elif event == "momentum_acceleration_down":
-                  current_state = "ACCELERATION_DOWN"
-
-              elif event == "momentum_reversal_up":
-                  current_state = "REVERSAL_UP"
-
-              elif event == "momentum_reversal_down":
-                  current_state = "REVERSAL_DOWN"
+              elif pressure == "supply_heavy" and price_change < 0:
+                  event = "SUPPLY_PRESSURE"
+                  reason = (
+                      "Negatif fiyat hareketi sırasında görünür "
+                      "satış likiditesi baskın."
+                  )
+                  decision_relevant = True
+                  global_required = True
+                  push_candidate = False
 
               else:
-                  current_state = previous_state
+                  return None
 
-              # -----------------------------------------------------
-              # IMPORTANT:
-              # Same-state event = SILENT.
-              # Lifecycle transition is what matters.
-              # -----------------------------------------------------
+              return {
+                  "coin": coin,
+                  "event": event,
+                  "decision_relevant": decision_relevant,
+                  "global_validation_required": global_required,
+                  "push_candidate": push_candidate,
+                  "price": price,
+                  "change_from_previous_snapshot": price_change,
+                  "volume_change": volume_change,
+                  "orderbook_pressure": pressure,
+                  "reason": reason,
+              }
 
-              state_changed = (
-                  current_state != previous_state
+          # ---------------------------------------------------------
+          # LIFECYCLE
+          # ---------------------------------------------------------
+
+          if lifecycle_path.exists():
+              lifecycle = json.loads(
+                  lifecycle_path.read_text()
               )
+          else:
+              lifecycle = {}
 
-              if not state_changed:
-                  print(
-                      f"{coin}: same state "
-                      f"{current_state}; silent"
-                  )
+          events_to_write = []
+
+          for coin, market in COINS.items():
+
+              detected = detect_event(coin, market)
+
+              if not detected:
+                  print(f"{coin}: no meaningful event")
                   continue
 
               detected_at = datetime.now(
                   timezone.utc
               ).isoformat()
 
-              event_record = {
+              previous_state = lifecycle.get(
+                  coin,
+                  {}
+              ).get("state", "UNKNOWN")
+
+              event_name = detected["event"]
+
+              # Lifecycle describes the current market behaviour.
+              if event_name in {
+                  "EXPANSION_UP",
+                  "PARTICIPATION_EXPANSION_UP",
+                  "DEMAND_SUPPORT",
+                  "REVERSAL_UP",
+              }:
+                  current_state = "EXPANSION_UP"
+
+              elif event_name in {
+                  "EXPANSION_DOWN",
+                  "PARTICIPATION_EXPANSION_DOWN",
+                  "SUPPLY_PRESSURE",
+                  "REVERSAL_DOWN",
+              }:
+                  current_state = "EXPANSION_DOWN"
+
+              else:
+                  current_state = previous_state
+
+              lifecycle[coin] = {
+                  "state": current_state,
+                  "last_event": event_name,
+                  "updated_at": detected_at,
+              }
+
+              events_to_write.append({
                   "detected_at": detected_at,
                   "fetched_at": fetched_at,
                   "coin": coin,
-                  "event": event,
+                  "event": event_name,
                   "previous_state": previous_state,
                   "current_state": current_state,
-                  "price": price,
-                  "change_from_previous_snapshot": current_change,
-                  "reference_high": reference_high,
-                  "reference_low": reference_low,
-                  "reason": reason,
-              }
+                  "decision_relevant": detected[
+                      "decision_relevant"
+                  ],
+                  "global_validation_required": detected[
+                      "global_validation_required"
+                  ],
+                  "push_candidate": detected[
+                      "push_candidate"
+                  ],
+                  "price": detected["price"],
+                  "change_from_previous_snapshot": detected[
+                      "change_from_previous_snapshot"
+                  ],
+                  "volume_change": detected["volume_change"],
+                  "orderbook_pressure": detected[
+                      "orderbook_pressure"
+                  ],
+                  "reason": detected["reason"],
+              })
 
-              events.append(event_record)
-
-              # Update lifecycle state.
-              if coin not in states:
-                  states[coin] = {}
-
-              states[coin]["state"] = current_state
-              states[coin]["last_event"] = event
-              states[coin]["last_transition_at"] = fetched_at
-              states[coin]["last_decision"] = None
-
-          # ---------------------------------------------------------
-          # WRITE STATE
-          # ---------------------------------------------------------
-
-          state_path.write_text(
-              json.dumps(
-                  states,
-                  indent=2,
-                  ensure_ascii=False
-              ) + "\n"
-          )
+              print(
+                  f"{coin}: {event_name} | "
+                  f"{previous_state} -> {current_state}"
+              )
 
           # ---------------------------------------------------------
-          # WRITE EVENTS
+          # WRITE EVENT + LIFECYCLE
           # ---------------------------------------------------------
 
-          if events:
-              with events_path.open("a") as f:
-                  for event in events:
+          if events_to_write:
+              events_path.parent.mkdir(
+                  parents=True,
+                  exist_ok=True
+              )
+
+              with events_path.open(
+                  "a",
+                  encoding="utf-8"
+              ) as f:
+                  for event in events_to_write:
                       f.write(
                           json.dumps(
                               event,
                               ensure_ascii=False
-                          ) + "\n"
+                          )
+                          + "\n"
                       )
 
-          print("================================")
-          print("Adaptive Event Detector")
-          print("================================")
-          print(f"Snapshot: {fetched_at}")
-          print(f"Snapshot age: {age_seconds:.0f}s")
-          print(f"Events detected: {len(events)}")
+          lifecycle_path.parent.mkdir(
+              parents=True,
+              exist_ok=True
+          )
 
-          for event in events:
-              print(
-                  f"{event['coin']}: "
-                  f"{event['previous_state']} -> "
-                  f"{event['current_state']} | "
-                  f"{event['event']}"
+          lifecycle_path.write_text(
+              json.dumps(
+                  lifecycle,
+                  indent=2,
+                  ensure_ascii=False
               )
+              + "\n"
+          )
 
-      - name: Commit lifecycle state
+          print("--------------------------------")
+          print("Adaptive Event Detector complete")
+          print(f"Snapshot: {fetched_at}")
+          print(f"Age: {age_seconds:.0f}s")
+          print("--------------------------------")
+
+      - name: Commit detector state
         shell: bash
         run: |
           set -euo pipefail
@@ -410,12 +559,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add state/lifecycle.json state/events.jsonl
+          git add state/events.jsonl state/lifecycle.json
 
           if git diff --cached --quiet; then
-            echo "No lifecycle/event changes."
+            echo "No detector state changes."
             exit 0
           fi
 
-          git commit -m "Update adaptive lifecycle events"
+          git commit -m "Refine adaptive event detector"
           git push origin HEAD:main
