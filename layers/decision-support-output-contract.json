@@ -1,0 +1,77 @@
+{
+  "name": "Decision Support Output Contract",
+  "version": "1.0",
+  "mode": "DECISION_SUPPORT_ONLY",
+  "purpose": "Defines the final human-readable decision-support output produced by combining Paribu local evidence with live Binance and OKX connector evidence.",
+  "execution_policy": {
+    "automatic_order_execution": false,
+    "human_decision_required": true
+  },
+  "required_inputs": {
+    "local_paribu": true,
+    "binance_connector": true,
+    "okx_connector": true
+  },
+  "supported_decisions": [
+    "ADD",
+    "ADD_CONSIDER",
+    "HOLD",
+    "WAIT",
+    "REDUCE_PROFIT",
+    "REDUCE",
+    "NO_ACTION"
+  ],
+  "required_output": {
+    "generated_at": "ISO-8601 UTC timestamp",
+    "data_freshness": {
+      "paribu": "timestamp and age",
+      "binance": "timestamp and age",
+      "okx": "timestamp and age"
+    },
+    "market_state": "RISK_ON | NEUTRAL | RISK_OFF | INSUFFICIENT_DATA",
+    "coins": {
+      "VIRTUAL": {
+        "decision": "one supported decision",
+        "confidence": "LOW | MEDIUM | HIGH",
+        "local_evidence": {},
+        "global_evidence": {},
+        "evidence_alignment": "CONFIRMED | PARTIAL | CONFLICT | INSUFFICIENT",
+        "decision_reason": "human-readable explanation",
+        "invalidation": "what would invalidate the current decision",
+        "next_check": "what evidence should be checked next"
+      },
+      "FET": {
+        "decision": "one supported decision",
+        "confidence": "LOW | MEDIUM | HIGH",
+        "local_evidence": {},
+        "global_evidence": {},
+        "evidence_alignment": "CONFIRMED | PARTIAL | CONFLICT | INSUFFICIENT",
+        "decision_reason": "human-readable explanation",
+        "invalidation": "what would invalidate the current decision",
+        "next_check": "what evidence should be checked next"
+      },
+      "KITE": {
+        "decision": "one supported decision",
+        "confidence": "LOW | MEDIUM | HIGH",
+        "local_evidence": {},
+        "global_evidence": {},
+        "evidence_alignment": "CONFIRMED | PARTIAL | CONFLICT | INSUFFICIENT",
+        "decision_reason": "human-readable explanation",
+        "invalidation": "what would invalidate the current decision",
+        "next_check": "what evidence should be checked next"
+      }
+    },
+    "portfolio_action_summary": {
+      "action": "NO_ACTION | MONITOR | CONSIDER_ADD | CONSIDER_REDUCE",
+      "reason": "human-readable explanation"
+    }
+  },
+  "safety_rules": {
+    "stale_data_blocks_high_confidence_decision": true,
+    "global_conflict_blocks_add": true,
+    "global_conflict_blocks_reduce": true,
+    "missing_global_evidence_blocks_action": true,
+    "local_global_alignment_required_for_action": true,
+    "human_confirmation_required": true
+  }
+}
