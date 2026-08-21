@@ -1,0 +1,997 @@
+name: Rolling Calibration Backtest
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rolling-calibration:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run rolling calibration backtest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import json
+          import glob
+          import math
+          from pathlib import Path
+          from datetime import datetime, timezone, timedelta
+
+          COINS = {
+              "VIRTUAL": "virtual_tl",
+              "FET": "fet_tl",
+              "KITE": "kite_tl",
+          }
+
+          WINDOWS = {
+              "24h": timedelta(hours=24),
+              "72h": timedelta(hours=72),
+              "7d": timedelta(days=7),
+          }
+
+          HORIZONS = {
+              "15m": timedelta(minutes=15),
+              "1h": timedelta(hours=1),
+              "4h": timedelta(hours=4),
+              "24h": timedelta(hours=24),
+          }
+
+          FOCUS_START = datetime(
+              2026, 8, 19, 0, 0, tzinfo=timezone.utc
+          )
+
+          FOCUS_END = datetime(
+              2026, 8, 22, 0, 0, tzinfo=timezone.utc
+          )
+
+          OUTPUT = Path(
+              "state/rolling_calibration_backtest.json"
+          )
+
+
+          def parse_time(value):
+              if not value:
+                  return None
+
+              try:
+                  value = value.replace("Z", "+00:00")
+                  dt = datetime.fromisoformat(value)
+
+                  if dt.tzinfo is None:
+                      dt = dt.replace(
+                          tzinfo=timezone.utc
+                      )
+
+                  return dt.astimezone(timezone.utc)
+
+              except (
+                  TypeError,
+                  ValueError
+              ):
+                  return None
+
+
+          def number(value):
+              try:
+                  return float(value)
+              except (
+                  TypeError,
+                  ValueError
+              ):
+                  return None
+
+
+          def percentile(values, p):
+              if not values:
+                  return None
+
+              values = sorted(values)
+
+              if len(values) == 1:
+                  return values[0]
+
+              position = (
+                  (len(values) - 1) * p
+              )
+
+              lower = math.floor(position)
+              upper = math.ceil(position)
+
+              if lower == upper:
+                  return values[lower]
+
+              fraction = (
+                  position - lower
+              )
+
+              return (
+                  values[lower]
+                  + (
+                      values[upper]
+                      - values[lower]
+                  ) * fraction
+              )
+
+
+          def load_history():
+              snapshots = []
+
+              for path in sorted(
+                  glob.glob("history/*.jsonl")
+              ):
+
+                  try:
+                      raw = Path(
+                          path
+                      ).read_text(
+                          encoding="utf-8"
+                      )
+
+                  except OSError:
+                      continue
+
+                  for line in raw.splitlines():
+
+                      line = line.strip()
+
+                      if not line:
+                          continue
+
+                      try:
+                          item = json.loads(line)
+
+                      except json.JSONDecodeError:
+                          continue
+
+                      timestamp = parse_time(
+                          item.get("fetched_at")
+                      )
+
+                      if timestamp is None:
+                          continue
+
+                      prices = {}
+
+                      markets = item.get(
+                          "markets",
+                          {}
+                      )
+
+                      for coin, market in COINS.items():
+
+                          market_data = markets.get(
+                              market,
+                              {}
+                          )
+
+                          price = number(
+                              market_data.get(
+                                  "last"
+                              )
+                          )
+
+                          if (
+                              price is None
+                              and isinstance(
+                                  market_data.get(
+                                      "ticker"
+                                  ),
+                                  list
+                              )
+                          ):
+
+                              try:
+                                  price = number(
+                                      market_data[
+                                          "ticker"
+                                      ][0]["last"]
+                                  )
+
+                              except (
+                                  KeyError,
+                                  TypeError,
+                                  IndexError
+                              ):
+                                  price = None
+
+                          if (
+                              price is not None
+                              and price > 0
+                          ):
+                              prices[coin] = price
+
+                      if prices:
+                          snapshots.append({
+                              "timestamp": timestamp,
+                              "prices": prices
+                          })
+
+              snapshots.sort(
+                  key=lambda x: x["timestamp"]
+              )
+
+              deduped = []
+
+              for item in snapshots:
+
+                  if (
+                      deduped
+                      and item["timestamp"]
+                      == deduped[-1]["timestamp"]
+                  ):
+                      deduped[-1] = item
+
+                  else:
+                      deduped.append(item)
+
+              return deduped
+
+
+          def nearest_before(
+              snapshots,
+              index,
+              target,
+              tolerance
+          ):
+              current = snapshots[index][
+                  "timestamp"
+              ]
+
+              best = None
+              best_gap = None
+
+              for j in range(
+                  index - 1,
+                  -1,
+                  -1
+              ):
+
+                  timestamp = snapshots[j][
+                      "timestamp"
+                  ]
+
+                  if timestamp > target:
+                      continue
+
+                  gap = (
+                      target - timestamp
+                  ).total_seconds()
+
+                  if gap > tolerance.total_seconds():
+                      break
+
+                  if (
+                      best_gap is None
+                      or gap < best_gap
+                  ):
+
+                      best = snapshots[j]
+                      best_gap = gap
+
+              return best
+
+
+          def returns_for_window(
+              snapshots,
+              index,
+              coin,
+              horizon
+          ):
+              current = snapshots[index]
+              current_price = current[
+                  "prices"
+              ].get(coin)
+
+              if current_price is None:
+                  return None
+
+              target = (
+                  current["timestamp"]
+                  - horizon
+              )
+
+              # History is collected approximately every 15m.
+              # Allow a modest gap around the target.
+              tolerance = timedelta(
+                  minutes=20
+              )
+
+              previous = nearest_before(
+                  snapshots,
+                  index,
+                  target,
+                  tolerance
+              )
+
+              if previous is None:
+                  return None
+
+              previous_price = previous[
+                  "prices"
+              ].get(coin)
+
+              if (
+                  previous_price is None
+                  or previous_price <= 0
+              ):
+                  return None
+
+              return (
+                  (
+                      current_price
+                      - previous_price
+                  )
+                  / previous_price
+                  * 100.0
+              )
+
+
+          def window_values(
+              snapshots,
+              index,
+              coin,
+              window
+          ):
+              current_time = snapshots[index][
+                  "timestamp"
+              ]
+
+              start_time = (
+                  current_time - window
+              )
+
+              values = []
+
+              for j in range(
+                  index - 1,
+                  -1,
+                  -1
+              ):
+
+                  timestamp = snapshots[j][
+                      "timestamp"
+                  ]
+
+                  if timestamp < start_time:
+                      break
+
+                  if timestamp >= current_time:
+                      continue
+
+                  value = snapshots[j][
+                      "prices"
+                  ].get(coin)
+
+                  if value is not None:
+                      values.append(
+                          value
+                      )
+
+              return values
+
+
+          def absolute_returns(
+              snapshots,
+              index,
+              coin,
+              window
+          ):
+              current_time = snapshots[index][
+                  "timestamp"
+              ]
+
+              current_price = snapshots[index][
+                  "prices"
+              ].get(coin)
+
+              if current_price is None:
+                  return []
+
+              start_time = (
+                  current_time - window
+              )
+
+              result = []
+
+              for j in range(
+                  index - 1,
+                  -1,
+                  -1
+              ):
+
+                  timestamp = snapshots[j][
+                      "timestamp"
+                  ]
+
+                  if timestamp < start_time:
+                      break
+
+                  previous_price = snapshots[j][
+                      "prices"
+                  ].get(coin)
+
+                  if (
+                      previous_price is None
+                      or previous_price <= 0
+                  ):
+                      continue
+
+                  result.append(
+                      abs(
+                          (
+                              current_price
+                              - previous_price
+                          )
+                          / previous_price
+                          * 100.0
+                      )
+                  )
+
+              return result
+
+
+          def classify(
+              current_move,
+              baseline_moves
+          ):
+              if (
+                  current_move is None
+                  or not baseline_moves
+              ):
+                  return "INSUFFICIENT_DATA"
+
+              values = [
+                  abs(x)
+                  for x in baseline_moves
+                  if x is not None
+              ]
+
+              if not values:
+                  return "INSUFFICIENT_DATA"
+
+              p50 = percentile(
+                  values,
+                  0.50
+              )
+
+              p75 = percentile(
+                  values,
+                  0.75
+              )
+
+              p90 = percentile(
+                  values,
+                  0.90
+              )
+
+              p95 = percentile(
+                  values,
+                  0.95
+              )
+
+              magnitude = abs(
+                  current_move
+              )
+
+              if magnitude <= p50:
+                  return "NORMAL"
+
+              if magnitude <= p75:
+                  return "ELEVATED"
+
+              if magnitude <= p90:
+                  return "SIGNIFICANT"
+
+              if magnitude <= p95:
+                  return "STRONG"
+
+              return "EXTREME"
+
+
+          def regime_label(
+              current_72h_vol,
+              baseline_7d_vol
+          ):
+              if (
+                  current_72h_vol is None
+                  or baseline_7d_vol is None
+                  or baseline_7d_vol <= 0
+              ):
+                  return "UNKNOWN"
+
+              ratio = (
+                  current_72h_vol
+                  / baseline_7d_vol
+              )
+
+              if ratio < 0.75:
+                  return "QUIET"
+
+              if ratio < 1.25:
+                  return "NORMAL"
+
+              if ratio < 1.75:
+                  return "ELEVATED"
+
+              return "HIGH"
+
+
+          def adjusted_classification(
+              current_move,
+              baseline_moves,
+              regime
+          ):
+              base = classify(
+                  current_move,
+                  baseline_moves
+              )
+
+              if base == "INSUFFICIENT_DATA":
+                  return base
+
+              # IMPORTANT:
+              # The 7d baseline remains the anchor.
+              # The shorter windows can influence
+              # interpretation but cannot redefine
+              # the long-term normal by themselves.
+              if regime == "QUIET":
+
+                  if base == "ELEVATED":
+                      return "SIGNIFICANT"
+
+                  if base == "SIGNIFICANT":
+                      return "STRONG"
+
+              if regime == "HIGH":
+
+                  if base == "EXTREME":
+                      return "EXTREME"
+
+                  if base == "STRONG":
+                      return "STRONG"
+
+                  if base == "SIGNIFICANT":
+                      return "SIGNIFICANT"
+
+              return base
+
+
+          snapshots = load_history()
+
+          print("========================================")
+          print("ROLLING CALIBRATION BACKTEST")
+          print("========================================")
+
+          print(
+              f"Historical snapshots: "
+              f"{len(snapshots)}"
+          )
+
+          if not snapshots:
+              raise SystemExit(
+                  "No historical data found."
+              )
+
+          print(
+              "History:",
+              snapshots[0]["timestamp"].isoformat(),
+              "->",
+              snapshots[-1]["timestamp"].isoformat()
+          )
+
+          print()
+          print(
+              "Baseline: 7 days"
+          )
+          print(
+              "Regime: 72 hours"
+          )
+          print(
+              "Short-term: 24 hours"
+          )
+
+          report = {
+              "schema_version": 1,
+              "timezone": "UTC",
+              "baseline_window": "7d",
+              "regime_window": "72h",
+              "short_window": "24h",
+              "focus_period": {
+                  "start": (
+                      FOCUS_START
+                      .isoformat()
+                      .replace(
+                          "+00:00",
+                          "Z"
+                      )
+                  ),
+                  "end": (
+                      FOCUS_END
+                      .isoformat()
+                      .replace(
+                          "+00:00",
+                          "Z"
+                      )
+                  ),
+              },
+              "coins": {}
+          }
+
+          print()
+          print("========================================")
+          print("FOCUS PERIOD: 19-21 AUGUST UTC")
+          print("========================================")
+
+          for coin in COINS:
+
+              results = []
+
+              for i, snapshot in enumerate(
+                  snapshots
+              ):
+
+                  timestamp = snapshot[
+                      "timestamp"
+                  ]
+
+                  if not (
+                      FOCUS_START
+                      <= timestamp
+                      < FOCUS_END
+                  ):
+                      continue
+
+                  # Need at least 7 days of history
+                  # before classifying against baseline.
+                  if (
+                      timestamp
+                      - snapshots[0]["timestamp"]
+                      < timedelta(days=7)
+                  ):
+                      continue
+
+                  current_15m = (
+                      returns_for_window(
+                          snapshots,
+                          i,
+                          coin,
+                          HORIZONS["15m"]
+                      )
+                  )
+
+                  current_1h = (
+                      returns_for_window(
+                          snapshots,
+                          i,
+                          coin,
+                          HORIZONS["1h"]
+                      )
+                  )
+
+                  current_4h = (
+                      returns_for_window(
+                          snapshots,
+                          i,
+                          coin,
+                          HORIZONS["4h"]
+                      )
+                  )
+
+                  current_24h = (
+                      returns_for_window(
+                          snapshots,
+                          i,
+                          coin,
+                          HORIZONS["24h"]
+                      )
+                  )
+
+                  if current_15m is None:
+                      continue
+
+                  baseline_15m = (
+                      absolute_returns(
+                          snapshots,
+                          i,
+                          coin,
+                          WINDOWS["7d"]
+                      )
+                  )
+
+                  baseline_1h = (
+                      absolute_returns(
+                          snapshots,
+                          i,
+                          coin,
+                          WINDOWS["7d"]
+                      )
+                  )
+
+                  baseline_4h = (
+                      absolute_returns(
+                          snapshots,
+                          i,
+                          coin,
+                          WINDOWS["7d"]
+                      )
+                  )
+
+                  baseline_24h = (
+                      absolute_returns(
+                          snapshots,
+                          i,
+                          coin,
+                          WINDOWS["7d"]
+                      )
+                  )
+
+                  # Short/recent regime:
+                  # compare 72h average absolute movement
+                  # with 7d average absolute movement.
+                  recent_72h = (
+                      absolute_returns(
+                          snapshots,
+                          i,
+                          coin,
+                          WINDOWS["72h"]
+                      )
+                  )
+
+                  recent_24h = (
+                      absolute_returns(
+                          snapshots,
+                          i,
+                          coin,
+                          WINDOWS["24h"]
+                      )
+                  )
+
+                  avg_72h = (
+                      sum(recent_72h)
+                      / len(recent_72h)
+                      if recent_72h
+                      else None
+                  )
+
+                  avg_7d = (
+                      sum(baseline_15m)
+                      / len(baseline_15m)
+                      if baseline_15m
+                      else None
+                  )
+
+                  regime = regime_label(
+                      avg_72h,
+                      avg_7d
+                  )
+
+                  result = {
+                      "timestamp": (
+                          timestamp
+                          .isoformat()
+                          .replace(
+                              "+00:00",
+                              "Z"
+                          )
+                      ),
+                      "regime": regime,
+                      "current": {
+                          "15m": current_15m,
+                          "1h": current_1h,
+                          "4h": current_4h,
+                          "24h": current_24h,
+                      },
+                      "rolling": {
+                          "15m": adjusted_classification(
+                              current_15m,
+                              baseline_15m,
+                              regime
+                          ),
+                          "1h": adjusted_classification(
+                              current_1h,
+                              baseline_1h,
+                              regime
+                          ),
+                          "4h": adjusted_classification(
+                              current_4h,
+                              baseline_4h,
+                              regime
+                          ),
+                          "24h": adjusted_classification(
+                              current_24h,
+                              baseline_24h,
+                              regime
+                          ),
+                      },
+                      "recent_regime": {
+                          "72h_average_abs_move": (
+                              avg_72h
+                          ),
+                          "24h_average_abs_move": (
+                              (
+                                  sum(recent_24h)
+                                  / len(recent_24h)
+                              )
+                              if recent_24h
+                              else None
+                          ),
+                          "7d_average_abs_move": (
+                              avg_7d
+                          ),
+                      }
+                  }
+
+                  results.append(
+                      result
+                  )
+
+              report["coins"][coin] = {
+                  "observations": len(
+                      results
+                  ),
+                  "results": results
+              }
+
+              print()
+              print(coin)
+
+              if not results:
+                  print(
+                      "  No valid observations."
+                  )
+                  continue
+
+              for horizon in (
+                  "15m",
+                  "1h",
+                  "4h",
+                  "24h"
+              ):
+
+                  counts = {
+                      "NORMAL": 0,
+                      "ELEVATED": 0,
+                      "SIGNIFICANT": 0,
+                      "STRONG": 0,
+                      "EXTREME": 0,
+                      "INSUFFICIENT_DATA": 0,
+                  }
+
+                  for item in results:
+
+                      label = item[
+                          "rolling"
+                      ][horizon]
+
+                      counts[label] = (
+                          counts.get(
+                              label,
+                              0
+                          ) + 1
+                      )
+
+                  print(
+                      f"  {horizon}: "
+                      f"N={counts['NORMAL']} "
+                      f"E={counts['ELEVATED']} "
+                      f"S={counts['SIGNIFICANT']} "
+                      f"ST={counts['STRONG']} "
+                      f"X={counts['EXTREME']}"
+                  )
+
+              regimes = {}
+
+              for item in results:
+
+                  regime = item[
+                      "regime"
+                  ]
+
+                  regimes[regime] = (
+                      regimes.get(
+                          regime,
+                          0
+                      ) + 1
+                  )
+
+              print(
+                  "  Regime:",
+                  " ".join(
+                      f"{k}={v}"
+                      for k, v in sorted(
+                          regimes.items()
+                      )
+                  )
+              )
+
+              # Print the last observation
+              # in the focus period for inspection.
+              latest = results[-1]
+
+              print(
+                  "  Latest:"
+              )
+
+              print(
+                  f"    {latest['timestamp']} "
+                  f"| regime={latest['regime']} "
+                  f"| 15m={latest['rolling']['15m']} "
+                  f"| 1h={latest['rolling']['1h']} "
+                  f"| 4h={latest['rolling']['4h']} "
+                  f"| 24h={latest['rolling']['24h']}"
+              )
+
+          OUTPUT.parent.mkdir(
+              parents=True,
+              exist_ok=True
+          )
+
+          OUTPUT.write_text(
+              json.dumps(
+                  report,
+                  indent=2,
+                  ensure_ascii=False
+              ) + "\n",
+              encoding="utf-8"
+          )
+
+          print()
+          print(
+              "========================================"
+          )
+          print(
+              "Rolling calibration backtest written to"
+          )
+          print(
+              "state/rolling_calibration_backtest.json"
+          )
+          print(
+              "========================================"
+          )
+          PY
+
+      - name: Validate report
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import json
+
+          path = (
+              "state/rolling_calibration_backtest.json"
+          )
+
+          with open(
+              path,
+              "r",
+              encoding="utf-8"
+          ) as f:
+              data = json.load(f)
+
+          assert data["schema_version"] == 1
+          assert data["timezone"] == "UTC"
+          assert data["baseline_window"] == "7d"
+          assert data["regime_window"] == "72h"
+          assert data["short_window"] == "24h"
+
+          for coin in (
+              "VIRTUAL",
+              "FET",
+              "KITE"
+          ):
+              assert coin in data["coins"]
+
+          print(
+              "Rolling calibration validation: OK"
+          )
+          PY
