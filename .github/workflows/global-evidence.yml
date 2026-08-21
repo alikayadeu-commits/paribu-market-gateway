@@ -54,7 +54,7 @@ jobs:
           }
 
           # =========================================================
-          # PARIBU SNAPSHOT
+          # PARIBU
           # =========================================================
 
           if [ ! -f data/latest.json ]; then
@@ -64,7 +64,10 @@ jobs:
 
           paribu_latest="$(cat data/latest.json)"
 
-          paribu_ok="$(jq -r '.ok // false' <<< "$paribu_latest")"
+          paribu_ok="$(
+            jq -r '.ok // false' <<< "$paribu_latest"
+          )"
+
           paribu_fetched_at="$(
             jq -r '.fetched_at // empty' <<< "$paribu_latest"
           )"
@@ -79,28 +82,28 @@ jobs:
             exit 1
           fi
 
-          # =========================================================
-          # PARIBU FRESHNESS
-          # =========================================================
-
           current_epoch="$(date -u +%s)"
           paribu_epoch="$(date -u -d "$paribu_fetched_at" +%s)"
 
-          paribu_age_seconds=$(
-            current_epoch - paribu_epoch
-          )
+          # IMPORTANT:
+          # Arithmetic must use $((...)).
+          paribu_age_seconds=$((current_epoch - paribu_epoch))
 
-          paribu_fresh="false"
+          if [ "$paribu_age_seconds" -lt 0 ]; then
+            paribu_age_seconds=0
+          fi
 
           if [ "$paribu_age_seconds" -le 45 ]; then
-            paribu_fresh="true"
+            paribu_freshness="fresh"
           elif [ "$paribu_age_seconds" -le 2700 ]; then
-            paribu_fresh="stale_warning"
+            paribu_freshness="stale_warning"
+          else
+            paribu_freshness="stale"
           fi
 
           echo "Paribu snapshot: ${paribu_fetched_at}"
           echo "Paribu age: ${paribu_age_seconds}s"
-          echo "Paribu freshness: ${paribu_fresh}"
+          echo "Paribu freshness: ${paribu_freshness}"
 
           # =========================================================
           # BINANCE
@@ -214,7 +217,8 @@ jobs:
                   price: null,
                   change_24h_pct: null,
                   volume_24h: null,
-                  quote_volume_24h: null
+                  quote_volume_24h: null,
+                  close_time_ms: null
                 }
               else
                 {
@@ -223,7 +227,13 @@ jobs:
                   price: (.lastPrice | tonumber),
                   change_24h_pct: (.priceChangePercent | tonumber),
                   volume_24h: (.volume | tonumber),
-                  quote_volume_24h: (.quoteVolume | tonumber)
+                  quote_volume_24h: (.quoteVolume | tonumber),
+                  close_time_ms: (
+                    if .closeTime != null
+                    then (.closeTime | tonumber)
+                    else null
+                    end
+                  )
                 }
               end
             ' <<< "$raw"
@@ -239,8 +249,8 @@ jobs:
             jq -c '
               if
                 (.code // "1") != "0"
-                or (($raw.data // []) | length) == 0
-                or ($raw.data[0].last // null) == null
+                or ((.data // []) | length) == 0
+                or (.data[0].last // null) == null
               then
                 {
                   available: false,
@@ -252,7 +262,7 @@ jobs:
                   timestamp_ms: null
                 }
               else
-                $raw.data[0] as $d |
+                .data[0] as $d |
                 {
                   available: true,
                   symbol: ($d.instId // null),
@@ -289,7 +299,7 @@ jobs:
                     end
                 }
               end
-            ' --argjson raw "$raw" <<< "$raw"
+            ' <<< "$raw"
           }
 
           bv="$(normalize_binance "$binance_virtual")"
@@ -303,48 +313,42 @@ jobs:
           ob="$(normalize_okx "$okx_btc")"
 
           # =========================================================
-          # PARIBU LOCAL VALUES
+          # PARIBU VALUES
           # =========================================================
 
           paribu_virtual_price="$(
             jq -r '
-              .markets.virtual_tl.ticker[0].last
-              // null
+              .markets.virtual_tl.ticker[0].last // null
             ' <<< "$paribu_latest"
           )"
 
           paribu_fet_price="$(
             jq -r '
-              .markets.fet_tl.ticker[0].last
-              // null
+              .markets.fet_tl.ticker[0].last // null
             ' <<< "$paribu_latest"
           )"
 
           paribu_kite_price="$(
             jq -r '
-              .markets.kite_tl.ticker[0].last
-              // null
+              .markets.kite_tl.ticker[0].last // null
             ' <<< "$paribu_latest"
           )"
 
           paribu_virtual_volume="$(
             jq -r '
-              .markets.virtual_tl.ticker[0].volume
-              // null
+              .markets.virtual_tl.ticker[0].volume // null
             ' <<< "$paribu_latest"
           )"
 
           paribu_fet_volume="$(
             jq -r '
-              .markets.fet_tl.ticker[0].volume
-              // null
+              .markets.fet_tl.ticker[0].volume // null
             ' <<< "$paribu_latest"
           )"
 
           paribu_kite_volume="$(
             jq -r '
-              .markets.kite_tl.ticker[0].volume
-              // null
+              .markets.kite_tl.ticker[0].volume // null
             ' <<< "$paribu_latest"
           )"
 
@@ -355,9 +359,8 @@ jobs:
           jq -n \
             --arg captured_at "$captured_at" \
             --arg paribu_fetched_at "$paribu_fetched_at" \
-            --arg paribu_fresh "$paribu_fresh" \
+            --arg paribu_freshness "$paribu_freshness" \
             --argjson paribu_age "$paribu_age_seconds" \
-            --argjson paribu "$paribu_latest" \
             --argjson bv "$bv" \
             --argjson bf "$bf" \
             --argjson bk "$bk" \
@@ -401,6 +404,8 @@ jobs:
               if
                 valid_price($a)
                 and valid_price($b)
+                and $a.change_24h_pct != null
+                and $b.change_24h_pct != null
               then
                 (
                   ($a.change_24h_pct - $b.change_24h_pct)
@@ -447,7 +452,6 @@ jobs:
               $global_direction_value;
               $btc_available
             ):
-
               if
                 $binance_available
                 and $okx_available
@@ -457,7 +461,6 @@ jobs:
                 and $btc_available
               then
                 "HIGH"
-
               elif
                 (
                   $binance_available
@@ -466,10 +469,8 @@ jobs:
                 and $global_direction_value != "unknown"
               then
                 "MEDIUM"
-
               else
                 "LOW"
-
               end;
 
             {
@@ -480,7 +481,7 @@ jobs:
                   available: true,
                   fetched_at: $paribu_fetched_at,
                   age_seconds: $paribu_age,
-                  freshness: $paribu_fresh
+                  freshness: $paribu_freshness
                 },
 
                 binance: {
@@ -613,23 +614,29 @@ jobs:
               },
 
               methodology: {
-                price_comparison:
-                  "Paribu TRY price is not directly compared with global USDT price.",
+                local_market:
+                  "Paribu prices are TRY-denominated and remain local-market evidence.",
 
-                global_comparison:
-                  "Global direction is compared across Binance and OKX.",
+                global_market:
+                  "Global direction is evaluated independently using Binance and OKX USDT markets.",
 
                 benchmark:
-                  "BTC/USDT is used as a broad crypto benchmark.",
+                  "BTC/USDT is used as a broad crypto-market benchmark.",
+
+                price_comparison:
+                  "Paribu TRY price is not directly compared numerically with global USDT price.",
+
+                volume:
+                  "Paribu volume describes local liquidity; Binance and OKX volumes describe global liquidity.",
+
+                agreement:
+                  "High-confidence global evidence requires agreement between Binance and OKX.",
 
                 missing_data:
-                  "Unavailable data is not treated as negative evidence.",
-
-                confidence:
-                  "Confidence reflects source availability, cross-exchange agreement, directional clarity and benchmark availability.",
+                  "Unavailable data is not treated as negative market evidence.",
 
                 decision:
-                  "This layer does not make buy, hold or sell decisions."
+                  "This layer provides evidence only and does not make buy, hold or sell decisions."
               }
             }
             ' > state/global_evidence.json
@@ -644,6 +651,7 @@ jobs:
           jq '{
             captured_at,
             source_health,
+            benchmarks,
             coins: {
               VIRTUAL: .coins.VIRTUAL.relationship,
               FET: .coins.FET.relationship,
@@ -666,6 +674,9 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Add validated global evidence layer"
+          git commit -m "Update global market evidence"
+
+          git fetch origin main
+          git rebase origin/main
 
           git push origin HEAD:main
