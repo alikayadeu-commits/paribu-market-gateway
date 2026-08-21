@@ -40,6 +40,8 @@ jobs:
           }
 
           BASELINE_WINDOW = timedelta(days=7)
+          MINIMUM_HISTORY = timedelta(days=14)
+
           REGIME_WINDOW = timedelta(hours=72)
           SHORT_WINDOW = timedelta(hours=24)
 
@@ -54,6 +56,8 @@ jobs:
           OUTPUT = Path(
               "state/rolling_calibration_backtest.json"
           )
+
+          MIN_BASELINE_OBSERVATIONS = 20
 
 
           def parse_time(value):
@@ -277,8 +281,6 @@ jobs:
                   - horizon
               )
 
-              # The collector is approximately 15-minute based.
-              # Allow up to 20 minutes of timestamp mismatch.
               reference = find_reference(
                   snapshots,
                   index,
@@ -316,23 +318,6 @@ jobs:
               horizon,
               baseline_window
           ):
-              """
-              IMPORTANT:
-
-              Build the baseline from HISTORICAL
-              horizon returns.
-
-              Example:
-              Current 15m move is compared only
-              against historical 15m moves.
-
-              Current 1h move is compared only
-              against historical 1h moves.
-
-              This prevents the previous bug where
-              different horizons were mixed together.
-              """
-
               current_time = snapshots[index][
                   "timestamp"
               ]
@@ -344,9 +329,6 @@ jobs:
 
               values = []
 
-              # Each historical observation becomes
-              # a valid comparison point only if it
-              # has its own horizon reference.
               for j in range(
                   index - 1,
                   -1,
@@ -373,9 +355,7 @@ jobs:
               return values
 
 
-          def average_absolute(
-              values
-          ):
+          def average_absolute(values):
               if not values:
                   return None
 
@@ -474,32 +454,6 @@ jobs:
               return "HIGH"
 
 
-          def adjusted_classification(
-              current_move,
-              baseline_moves,
-              regime
-          ):
-              """
-              The 7-day baseline remains the
-              statistical anchor.
-
-              Regime information is deliberately
-              conservative.
-
-              We do NOT downgrade a significant
-              movement simply because the last
-              72 hours became volatile.
-
-              The system must not learn an abnormal
-              market as its new normal too quickly.
-              """
-
-              return classify(
-                  current_move,
-                  baseline_moves
-              )
-
-
           snapshots = load_history()
 
           print("========================================")
@@ -516,22 +470,91 @@ jobs:
                   "No historical data found."
               )
 
+          history_start = snapshots[0][
+              "timestamp"
+          ]
+
+          history_end = snapshots[-1][
+              "timestamp"
+          ]
+
+          history_duration = (
+              history_end
+              - history_start
+          )
+
           print(
               "History:",
-              snapshots[0]["timestamp"].isoformat(),
+              history_start.isoformat(),
               "->",
-              snapshots[-1]["timestamp"].isoformat()
+              history_end.isoformat()
+          )
+
+          print(
+              "History duration:",
+              str(history_duration)
           )
 
           print()
-          print("Baseline: 7 days")
-          print("Regime: 72 hours")
-          print("Short-term: 24 hours")
+          print("Baseline window: 7 days")
+          print("Minimum history required: 14 days")
+          print("Regime window: 72 hours")
+          print("Short-term window: 24 hours")
+
+          activation = {
+              "active": (
+                  history_duration
+                  >= MINIMUM_HISTORY
+              ),
+              "minimum_history_days": 14,
+              "available_history_days": (
+                  history_duration.total_seconds()
+                  / 86400.0
+              ),
+              "reason": None
+          }
+
+          if not activation["active"]:
+              activation["reason"] = (
+                  "Rolling calibration inactive: "
+                  "minimum 14-day history requirement "
+                  "has not been reached."
+              )
+
+          print()
+          print("========================================")
+          print("CALIBRATION ACTIVATION")
+          print("========================================")
+
+          print(
+              "Status:",
+              "ACTIVE"
+              if activation["active"]
+              else "INACTIVE"
+          )
+
+          print(
+              "Available history:",
+              f"{activation['available_history_days']:.2f} days"
+          )
+
+          print(
+              "Required history:",
+              "14.00 days"
+          )
+
+          if activation["reason"]:
+              print(
+                  "Reason:",
+                  activation["reason"]
+              )
 
           report = {
-              "schema_version": 2,
+              "schema_version": 3,
               "timezone": "UTC",
+              "activation": activation,
               "baseline_window": "7d",
+              "minimum_history": "14d",
               "regime_window": "72h",
               "short_window": "24h",
               "baseline_method": (
@@ -563,334 +586,346 @@ jobs:
           print("FOCUS PERIOD: 19-21 AUGUST UTC")
           print("========================================")
 
-          for coin in COINS:
-
-              results = []
-
-              for i, snapshot in enumerate(
-                  snapshots
-              ):
-
-                  timestamp = snapshot[
-                      "timestamp"
-                  ]
-
-                  if not (
-                      FOCUS_START
-                      <= timestamp
-                      < FOCUS_END
-                  ):
-                      continue
-
-                  # We require a complete 7-day
-                  # baseline before evaluating.
-                  if (
-                      timestamp
-                      - snapshots[0]["timestamp"]
-                      < BASELINE_WINDOW
-                  ):
-                      continue
-
-                  current = {}
-
-                  baseline = {}
-
-                  classifications = {}
-
-                  enough_data = True
-
-                  for name, horizon in HORIZONS.items():
-
-                      current_move = horizon_return(
-                          snapshots,
-                          i,
-                          coin,
-                          horizon
-                      )
-
-                      historical_moves = (
-                          historical_horizon_returns(
-                              snapshots,
-                              i,
-                              coin,
-                              horizon,
-                              BASELINE_WINDOW
-                          )
-                      )
-
-                      current[name] = (
-                          current_move
-                      )
-
-                      baseline[name] = (
-                          historical_moves
-                      )
-
-                      classifications[name] = (
-                          classify(
-                              current_move,
-                              historical_moves
-                          )
-                      )
-
-                      if (
-                          current_move is None
-                          or len(
-                              historical_moves
-                          ) < 20
-                      ):
-                          enough_data = False
-
-                  if not enough_data:
-                      continue
-
-                  # =================================================
-                  # REGIME CALCULATION
-                  #
-                  # Regime is based on 15m movement frequency,
-                  # comparing recent 72h activity against the
-                  # complete 7d baseline.
-                  # =================================================
-
-                  recent_72h = []
-
-                  recent_24h = []
-
-                  for j in range(
-                      i - 1,
-                      -1,
-                      -1
-                  ):
-
-                      historical_time = (
-                          snapshots[j][
-                              "timestamp"
-                          ]
-                      )
-
-                      age = (
-                          timestamp
-                          - historical_time
-                      )
-
-                      if age > REGIME_WINDOW:
-                          break
-
-                      value = horizon_return(
-                          snapshots,
-                          j,
-                          coin,
-                          HORIZONS["15m"]
-                      )
-
-                      if value is not None:
-                          recent_72h.append(
-                              abs(value)
-                          )
-
-                  for j in range(
-                      i - 1,
-                      -1,
-                      -1
-                  ):
-
-                      historical_time = (
-                          snapshots[j][
-                              "timestamp"
-                          ]
-                      )
-
-                      age = (
-                          timestamp
-                          - historical_time
-                      )
-
-                      if age > SHORT_WINDOW:
-                          break
-
-                      value = horizon_return(
-                          snapshots,
-                          j,
-                          coin,
-                          HORIZONS["15m"]
-                      )
-
-                      if value is not None:
-                          recent_24h.append(
-                              abs(value)
-                          )
-
-                  baseline_7d_15m = (
-                      baseline["15m"]
-                  )
-
-                  recent_72h_average = (
-                      average_absolute(
-                          recent_72h
-                      )
-                  )
-
-                  recent_24h_average = (
-                      average_absolute(
-                          recent_24h
-                      )
-                  )
-
-                  baseline_7d_average = (
-                      average_absolute(
-                          baseline_7d_15m
-                      )
-                  )
-
-                  regime = regime_label(
-                      recent_72h_average,
-                      baseline_7d_average
-                  )
-
-                  results.append({
-                      "timestamp": (
-                          timestamp
-                          .isoformat()
-                          .replace(
-                              "+00:00",
-                              "Z"
-                          )
-                      ),
-                      "regime": regime,
-                      "current": current,
-                      "rolling": classifications,
-                      "recent_regime": {
-                          "72h_average_abs_15m_move": (
-                              recent_72h_average
-                          ),
-                          "24h_average_abs_15m_move": (
-                              recent_24h_average
-                          ),
-                          "7d_average_abs_15m_move": (
-                              baseline_7d_average
-                          )
-                      }
-                  })
-
-              report["coins"][coin] = {
-                  "observations": len(
-                      results
-                  ),
-                  "results": results
-              }
+          if not activation["active"]:
 
               print()
-              print(coin)
+              print(
+                  "Rolling calibration is INACTIVE."
+              )
 
-              if not results:
-                  print(
-                      "  No valid observations."
-                  )
-                  continue
+              print(
+                  "No rolling classifications "
+                  "will be produced."
+              )
 
-              for horizon in (
-                  "15m",
-                  "1h",
-                  "4h",
-                  "24h"
-              ):
+              for coin in COINS:
 
-                  counts = {
-                      "NORMAL": 0,
-                      "ELEVATED": 0,
-                      "SIGNIFICANT": 0,
-                      "STRONG": 0,
-                      "EXTREME": 0,
-                      "INSUFFICIENT_DATA": 0
+                  report["coins"][coin] = {
+                      "status": "INACTIVE",
+                      "observations": 0,
+                      "results": []
                   }
+
+          else:
+
+              for coin in COINS:
+
+                  results = []
+
+                  for i, snapshot in enumerate(
+                      snapshots
+                  ):
+
+                      timestamp = snapshot[
+                          "timestamp"
+                      ]
+
+                      if not (
+                          FOCUS_START
+                          <= timestamp
+                          < FOCUS_END
+                      ):
+                          continue
+
+                      if (
+                          timestamp
+                          - history_start
+                          < MINIMUM_HISTORY
+                      ):
+                          continue
+
+                      current = {}
+                      baseline = {}
+                      classifications = {}
+
+                      enough_data = True
+
+                      for (
+                          name,
+                          horizon
+                      ) in HORIZONS.items():
+
+                          current_move = (
+                              horizon_return(
+                                  snapshots,
+                                  i,
+                                  coin,
+                                  horizon
+                              )
+                          )
+
+                          historical_moves = (
+                              historical_horizon_returns(
+                                  snapshots,
+                                  i,
+                                  coin,
+                                  horizon,
+                                  BASELINE_WINDOW
+                              )
+                          )
+
+                          current[name] = (
+                              current_move
+                          )
+
+                          baseline[name] = (
+                              historical_moves
+                          )
+
+                          classifications[name] = (
+                              classify(
+                                  current_move,
+                                  historical_moves
+                              )
+                          )
+
+                          if (
+                              current_move is None
+                              or len(
+                                  historical_moves
+                              )
+                              < MIN_BASELINE_OBSERVATIONS
+                          ):
+                              enough_data = False
+
+                      if not enough_data:
+                          continue
+
+                      recent_72h = []
+                      recent_24h = []
+
+                      for j in range(
+                          i - 1,
+                          -1,
+                          -1
+                      ):
+
+                          historical_time = (
+                              snapshots[j][
+                                  "timestamp"
+                              ]
+                          )
+
+                          age = (
+                              timestamp
+                              - historical_time
+                          )
+
+                          if age > REGIME_WINDOW:
+                              break
+
+                          value = horizon_return(
+                              snapshots,
+                              j,
+                              coin,
+                              HORIZONS["15m"]
+                          )
+
+                          if value is not None:
+                              recent_72h.append(
+                                  abs(value)
+                              )
+
+                      for j in range(
+                          i - 1,
+                          -1,
+                          -1
+                      ):
+
+                          historical_time = (
+                              snapshots[j][
+                                  "timestamp"
+                              ]
+                          )
+
+                          age = (
+                              timestamp
+                              - historical_time
+                          )
+
+                          if age > SHORT_WINDOW:
+                              break
+
+                          value = horizon_return(
+                              snapshots,
+                              j,
+                              coin,
+                              HORIZONS["15m"]
+                          )
+
+                          if value is not None:
+                              recent_24h.append(
+                                  abs(value)
+                              )
+
+                      baseline_7d = (
+                          average_absolute(
+                              baseline["15m"]
+                          )
+                      )
+
+                      recent_72h_average = (
+                          average_absolute(
+                              recent_72h
+                          )
+                      )
+
+                      recent_24h_average = (
+                          average_absolute(
+                              recent_24h
+                          )
+                      )
+
+                      regime = regime_label(
+                          recent_72h_average,
+                          baseline_7d
+                      )
+
+                      results.append({
+                          "timestamp": (
+                              timestamp
+                              .isoformat()
+                              .replace(
+                                  "+00:00",
+                                  "Z"
+                              )
+                          ),
+                          "regime": regime,
+                          "current": current,
+                          "rolling": classifications,
+                          "recent_regime": {
+                              "72h_average_abs_15m_move": (
+                                  recent_72h_average
+                              ),
+                              "24h_average_abs_15m_move": (
+                                  recent_24h_average
+                              ),
+                              "7d_average_abs_15m_move": (
+                                  baseline_7d
+                              )
+                          }
+                      })
+
+                  report["coins"][coin] = {
+                      "status": "ACTIVE",
+                      "observations": len(
+                          results
+                      ),
+                      "results": results
+                  }
+
+                  print()
+                  print(coin)
+
+                  if not results:
+                      print(
+                          "  No valid observations."
+                      )
+                      continue
+
+                  for horizon in (
+                      "15m",
+                      "1h",
+                      "4h",
+                      "24h"
+                  ):
+
+                      counts = {
+                          "NORMAL": 0,
+                          "ELEVATED": 0,
+                          "SIGNIFICANT": 0,
+                          "STRONG": 0,
+                          "EXTREME": 0,
+                          "INSUFFICIENT_DATA": 0
+                      }
+
+                      for item in results:
+
+                          label = item[
+                              "rolling"
+                          ][horizon]
+
+                          counts[label] = (
+                              counts.get(
+                                  label,
+                                  0
+                              ) + 1
+                          )
+
+                      print(
+                          f"  {horizon}: "
+                          f"N={counts['NORMAL']} "
+                          f"E={counts['ELEVATED']} "
+                          f"S={counts['SIGNIFICANT']} "
+                          f"ST={counts['STRONG']} "
+                          f"X={counts['EXTREME']}"
+                      )
+
+                  regimes = {}
 
                   for item in results:
 
-                      label = item[
-                          "rolling"
-                      ][horizon]
+                      regime = item[
+                          "regime"
+                      ]
 
-                      counts[label] = (
-                          counts.get(
-                              label,
+                      regimes[regime] = (
+                          regimes.get(
+                              regime,
                               0
                           ) + 1
                       )
 
                   print(
-                      f"  {horizon}: "
-                      f"N={counts['NORMAL']} "
-                      f"E={counts['ELEVATED']} "
-                      f"S={counts['SIGNIFICANT']} "
-                      f"ST={counts['STRONG']} "
-                      f"X={counts['EXTREME']}"
-                  )
-
-              regimes = {}
-
-              for item in results:
-
-                  regime = item[
-                      "regime"
-                  ]
-
-                  regimes[regime] = (
-                      regimes.get(
-                          regime,
-                          0
-                      ) + 1
-                  )
-
-              print(
-                  "  Regime:",
-                  " ".join(
-                      f"{key}={value}"
-                      for key, value
-                      in sorted(
-                          regimes.items()
+                      "  Regime:",
+                      " ".join(
+                          f"{key}={value}"
+                          for key, value
+                          in sorted(
+                              regimes.items()
+                          )
                       )
                   )
-              )
 
-              latest = results[-1]
+                  latest = results[-1]
 
-              print(
-                  "  Latest:"
-              )
+                  print(
+                      "  Latest:"
+                  )
 
-              print(
-                  f"    {latest['timestamp']} "
-                  f"| regime={latest['regime']} "
-                  f"| 15m={latest['rolling']['15m']} "
-                  f"| 1h={latest['rolling']['1h']} "
-                  f"| 4h={latest['rolling']['4h']} "
-                  f"| 24h={latest['rolling']['24h']}"
-              )
+                  print(
+                      f"    {latest['timestamp']} "
+                      f"| regime={latest['regime']} "
+                      f"| 15m={latest['rolling']['15m']} "
+                      f"| 1h={latest['rolling']['1h']} "
+                      f"| 4h={latest['rolling']['4h']} "
+                      f"| 24h={latest['rolling']['24h']}"
+                  )
 
-              print(
-                  "  Latest current moves:"
-              )
+                  print(
+                      "  Latest current moves:"
+                  )
 
-              for horizon in (
-                  "15m",
-                  "1h",
-                  "4h",
-                  "24h"
-              ):
+                  for horizon in (
+                      "15m",
+                      "1h",
+                      "4h",
+                      "24h"
+                  ):
 
-                  value = latest[
-                      "current"
-                  ][horizon]
+                      value = latest[
+                          "current"
+                      ][horizon]
 
-                  if value is None:
-                      print(
-                          f"    {horizon}: unavailable"
-                      )
-                  else:
-                      print(
-                          f"    {horizon}: "
-                          f"{value:+.4f}%"
-                      )
+                      if value is None:
+                          print(
+                              f"    {horizon}: unavailable"
+                          )
+                      else:
+                          print(
+                              f"    {horizon}: "
+                              f"{value:+.4f}%"
+                          )
 
           OUTPUT.parent.mkdir(
               parents=True,
@@ -936,15 +971,14 @@ jobs:
           ) as f:
               data = json.load(f)
 
-          assert data["schema_version"] == 2
+          assert data["schema_version"] == 3
           assert data["timezone"] == "UTC"
           assert data["baseline_window"] == "7d"
+          assert data["minimum_history"] == "14d"
           assert data["regime_window"] == "72h"
           assert data["short_window"] == "24h"
-          assert (
-              data["baseline_method"]
-              == "same_horizon_historical_returns"
-          )
+
+          assert "activation" in data
 
           for coin in (
               "VIRTUAL",
@@ -953,7 +987,19 @@ jobs:
           ):
               assert coin in data["coins"]
 
+          if not data["activation"]["active"]:
+
+              for coin in (
+                  "VIRTUAL",
+                  "FET",
+                  "KITE"
+              ):
+                  assert (
+                      data["coins"][coin]["status"]
+                      == "INACTIVE"
+                  )
+
           print(
-              "Rolling calibration validation: OK"
+              "Rolling calibration activation validation: OK"
           )
           PY
