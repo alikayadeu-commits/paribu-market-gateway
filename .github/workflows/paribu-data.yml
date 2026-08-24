@@ -23,7 +23,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p data history
+          mkdir -p data history orderbook_history
 
           fetched_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           history_date="$(date -u +"%Y-%m-%d")"
@@ -64,6 +64,7 @@ jobs:
               }
             }' > data/latest.json
 
+          # Keep the existing price/volume history unchanged.
           jq -c \
             --arg fetched_at "$fetched_at" \
             '{
@@ -91,6 +92,41 @@ jobs:
             }' data/latest.json \
             >> "history/${history_date}.jsonl"
 
+          # Store a separate historical orderbook snapshot.
+          # This does not modify or replace the existing market history.
+          jq -c \
+            --arg fetched_at "$fetched_at" \
+            '{
+              fetched_at: $fetched_at,
+              markets: {
+                virtual_tl: {
+                  seq: .markets.virtual_tl.orderbook.seq,
+                  timestamp: .markets.virtual_tl.orderbook.timestamp,
+                  last_offset: .markets.virtual_tl.orderbook.last_offset,
+                  last: .markets.virtual_tl.ticker[0].last,
+                  bids: .markets.virtual_tl.orderbook.bids,
+                  asks: .markets.virtual_tl.orderbook.asks
+                },
+                fet_tl: {
+                  seq: .markets.fet_tl.orderbook.seq,
+                  timestamp: .markets.fet_tl.orderbook.timestamp,
+                  last_offset: .markets.fet_tl.orderbook.last_offset,
+                  last: .markets.fet_tl.ticker[0].last,
+                  bids: .markets.fet_tl.orderbook.bids,
+                  asks: .markets.fet_tl.orderbook.asks
+                },
+                kite_tl: {
+                  seq: .markets.kite_tl.orderbook.seq,
+                  timestamp: .markets.kite_tl.orderbook.timestamp,
+                  last_offset: .markets.kite_tl.orderbook.last_offset,
+                  last: .markets.kite_tl.ticker[0].last,
+                  bids: .markets.kite_tl.orderbook.bids,
+                  asks: .markets.kite_tl.orderbook.asks
+                }
+              }
+            }' data/latest.json \
+            >> "orderbook_history/${history_date}.jsonl"
+
       - name: Commit data
         shell: bash
         run: |
@@ -99,14 +135,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add data/ history/
+          git add data/ history/ orderbook_history/
 
           if git diff --cached --quiet; then
             echo "No changes to commit"
             exit 0
           fi
 
-          git commit -m "Update Paribu market data"
+          git commit -m "Add Paribu orderbook history"
 
           git fetch origin main
           git rebase origin/main
