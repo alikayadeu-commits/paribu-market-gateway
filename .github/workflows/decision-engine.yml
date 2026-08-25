@@ -3,7 +3,7 @@ name: Adaptive Decision Engine
 on:
   workflow_run:
     workflows:
-      - "Adaptive Event Detector"
+      - "P5 V2 Evidence Engine"
     types:
       - completed
 
@@ -25,15 +25,30 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # ============================================================
+      # BUILD LOCAL EVIDENCE SNAPSHOT
+      # ============================================================
 
       - name: Build local evidence snapshot
         shell: python
         run: |
+
           import json
           from pathlib import Path
           from datetime import datetime, timezone
+
+
+          # ========================================================
+          # CONFIGURATION
+          # ========================================================
 
           COINS = {
               "VIRTUAL": "virtual_tl",
@@ -42,18 +57,44 @@ jobs:
               "ATH": "ath_tl",
           }
 
-          latest_path = Path("data/latest.json")
-          lifecycle_path = Path("state/lifecycle.json")
-          events_path = Path("state/events.jsonl")
-          output_path = Path("state/decision.json")
 
-          # =========================================================
+          # ========================================================
+          # PATHS
+          # ========================================================
+
+          latest_path = Path(
+              "data/latest.json"
+          )
+
+          lifecycle_path = Path(
+              "state/lifecycle.json"
+          )
+
+          events_path = Path(
+              "state/events.jsonl"
+          )
+
+          p5_path = Path(
+              "state/p5_v2.json"
+          )
+
+          output_path = Path(
+              "state/decision.json"
+          )
+
+
+          # ========================================================
           # LOAD PARIBU SNAPSHOT
-          # =========================================================
+          # ========================================================
 
           if not latest_path.exists():
-              print("Paribu snapshot unavailable.")
+
+              print(
+                  "Paribu snapshot unavailable."
+              )
+
               raise SystemExit(0)
+
 
           latest = json.loads(
               latest_path.read_text(
@@ -61,61 +102,98 @@ jobs:
               )
           )
 
+
           if latest.get("ok") is not True:
-              print("Paribu data invalid.")
+
+              print(
+                  "Paribu data invalid."
+              )
+
               raise SystemExit(0)
 
-          fetched_at = latest.get("fetched_at")
 
-          if not fetched_at:
-              print("Missing fetched_at.")
-              raise SystemExit(0)
-
-          fetched_dt = datetime.fromisoformat(
-              fetched_at.replace("Z", "+00:00")
+          fetched_at = latest.get(
+              "fetched_at"
           )
 
-          now = datetime.now(timezone.utc)
+
+          if not fetched_at:
+
+              print(
+                  "Missing fetched_at."
+              )
+
+              raise SystemExit(0)
+
+
+          fetched_dt = datetime.fromisoformat(
+              fetched_at.replace(
+                  "Z",
+                  "+00:00"
+              )
+          )
+
+
+          now = datetime.now(
+              timezone.utc
+          )
+
 
           age_seconds = (
               now - fetched_dt
           ).total_seconds()
 
+
           if age_seconds < -300:
-              print("Future-dated snapshot.")
+
+              print(
+                  "Future-dated snapshot."
+              )
+
               raise SystemExit(0)
 
+
           if age_seconds > 45 * 60:
+
               print(
                   f"Stale Paribu data: "
                   f"{age_seconds:.0f}s."
               )
+
               raise SystemExit(0)
 
-          # =========================================================
+
+          # ========================================================
           # LOAD LIFECYCLE
-          # =========================================================
+          # ========================================================
 
           lifecycle = {}
 
+
           if lifecycle_path.exists():
+
               try:
+
                   lifecycle = json.loads(
                       lifecycle_path.read_text(
                           encoding="utf-8"
                       )
                   )
+
               except (
                   OSError,
                   json.JSONDecodeError
               ):
+
                   lifecycle = {}
 
-          # =========================================================
+
+          # ========================================================
           # LOAD EVENTS
-          # =========================================================
+          # ========================================================
 
           events = []
+
 
           if events_path.exists():
 
@@ -127,38 +205,128 @@ jobs:
                       continue
 
                   try:
+
                       events.append(
                           json.loads(line)
                       )
+
                   except json.JSONDecodeError:
+
                       continue
+
 
           latest_events = {}
 
+
           for event in events:
 
-              coin = event.get("coin")
+              coin = event.get(
+                  "coin"
+              )
+
 
               if coin not in COINS:
                   continue
+
 
               event_time = event.get(
                   "fetched_at"
               )
 
+
               if (
                   event_time
                   and event_time <= fetched_at
               ):
+
                   latest_events[coin] = event
 
-          # =========================================================
+
+          # ========================================================
+          # LOAD P5 V2
+          # ========================================================
+
+          p5 = {}
+
+
+          if p5_path.exists():
+
+              try:
+
+                  p5 = json.loads(
+                      p5_path.read_text(
+                          encoding="utf-8"
+                      )
+                  )
+
+              except (
+                  OSError,
+                  json.JSONDecodeError
+              ):
+
+                  p5 = {}
+
+
+          p5_version = p5.get(
+              "version"
+          )
+
+          p5_status = p5.get(
+              "status"
+          )
+
+          p5_snapshot_at = p5.get(
+              "snapshot_at"
+          )
+
+          p5_data_health = p5.get(
+              "data_health",
+              {}
+          )
+
+
+          # ========================================================
+          # P5 DATA HEALTH CHECK
+          # ========================================================
+
+          p5_healthy = (
+              p5_status == "FROZEN"
+              and
+              p5_data_health.get(
+                  "healthy"
+              ) is True
+          )
+
+
+          # P5 must correspond to the
+          # same Paribu snapshot.
+          #
+          # If it does not, we preserve the
+          # P5 output but mark it as stale
+          # for decision support.
+
+
+          p5_snapshot_matches = (
+              p5_snapshot_at
+              == fetched_at
+          )
+
+
+          p5_available = (
+              p5_healthy
+              and
+              p5_snapshot_matches
+          )
+
+
+          # ========================================================
           # HELPERS
-          # =========================================================
+          # ========================================================
 
           def number(value):
 
               try:
+
                   return float(value)
 
               except (
@@ -181,9 +349,13 @@ jobs:
 
           def current_price(market):
 
-              data = market_data(market)
+              data = market_data(
+                  market
+              )
+
 
               try:
+
                   return number(
                       data["ticker"][0]["last"]
                   )
@@ -193,14 +365,19 @@ jobs:
                   TypeError,
                   IndexError
               ):
+
                   return None
 
 
           def current_volume(market):
 
-              data = market_data(market)
+              data = market_data(
+                  market
+              )
+
 
               try:
+
                   return number(
                       data["ticker"][0]["volume"]
                   )
@@ -210,66 +387,107 @@ jobs:
                   TypeError,
                   IndexError
               ):
+
                   return None
 
 
           def orderbook_pressure(market):
 
-              data = market_data(market)
+              data = market_data(
+                  market
+              )
+
 
               try:
 
-                  bids = data["orderbook"]["bids"]
-                  asks = data["orderbook"]["asks"]
+                  bids = (
+                      data["orderbook"]["bids"]
+                  )
+
+                  asks = (
+                      data["orderbook"]["asks"]
+                  )
+
 
                   bid_volume = 0.0
                   ask_volume = 0.0
 
+
                   for item in bids:
 
-                      price = number(item[0])
-                      quantity = number(item[1])
+                      price = number(
+                          item[0]
+                      )
+
+                      quantity = number(
+                          item[1]
+                      )
+
 
                       if (
                           price is not None
-                          and quantity is not None
+                          and
+                          quantity is not None
                       ):
+
                           bid_volume += (
-                              price * quantity
+                              price
+                              * quantity
                           )
+
 
                   for item in asks:
 
-                      price = number(item[0])
-                      quantity = number(item[1])
+                      price = number(
+                          item[0]
+                      )
+
+                      quantity = number(
+                          item[1]
+                      )
+
 
                       if (
                           price is not None
-                          and quantity is not None
+                          and
+                          quantity is not None
                       ):
+
                           ask_volume += (
-                              price * quantity
+                              price
+                              * quantity
                           )
+
 
                   total = (
                       bid_volume
                       + ask_volume
                   )
 
+
                   if total <= 0:
+
                       return "unknown"
 
+
                   ratio = (
-                      bid_volume / total
+                      bid_volume
+                      / total
                   )
 
+
                   if ratio >= 0.60:
+
                       return "demand_heavy"
 
+
                   if ratio <= 0.40:
+
                       return "supply_heavy"
 
+
                   return "balanced"
+
 
               except (
                   KeyError,
@@ -277,27 +495,62 @@ jobs:
                   IndexError,
                   ValueError
               ):
+
                   return "unknown"
 
-          # =========================================================
-          # LOCAL EVIDENCE
-          # =========================================================
+
+          # ========================================================
+          # OUTPUT HEADER
+          # ========================================================
 
           output = {
-              "generated_at": datetime.now(
-                  timezone.utc
-              ).isoformat(),
 
-              "snapshot_at": fetched_at,
+              "generated_at":
+                  datetime.now(
+                      timezone.utc
+                  ).isoformat(),
 
-              "mode": "LOCAL_EVIDENCE_ONLY",
+              "snapshot_at":
+                  fetched_at,
 
-              "decision_authority": (
-                  "EXTERNAL_DECISION_SUPPORT_ENGINE"
-              ),
+              "mode":
+                  "LOCAL_EVIDENCE_ONLY",
 
-              "coins": {}
+              "decision_authority":
+                  "EXTERNAL_DECISION_SUPPORT_ENGINE",
+
+              "p5_v2": {
+
+                  "available":
+                      p5_available,
+
+                  "version":
+                      p5_version,
+
+                  "status":
+                      p5_status,
+
+                  "snapshot_at":
+                      p5_snapshot_at,
+
+                  "snapshot_matches":
+                      p5_snapshot_matches,
+
+                  "data_healthy":
+                      p5_data_health.get(
+                          "healthy",
+                          False
+                      ),
+              },
+
+              "coins":
+                  {}
           }
+
+
+          # ========================================================
+          # COIN EVIDENCE
+          # ========================================================
 
           for coin, market in COINS.items():
 
@@ -306,98 +559,268 @@ jobs:
                   {}
               )
 
-              lifecycle_item = lifecycle.get(
-                  coin,
-                  {}
+
+              lifecycle_item = (
+                  lifecycle.get(
+                      coin,
+                      {}
+                  )
               )
+
 
               price = current_price(
                   market
               )
 
+
               volume = current_volume(
                   market
               )
+
 
               pressure = orderbook_pressure(
                   market
               )
 
+
+              # ----------------------------------------------------
+              # P5 COIN OUTPUT
+              # ----------------------------------------------------
+
+              p5_coin = {}
+
+
+              if p5_available:
+
+                  p5_coin = (
+                      p5.get(
+                          "coins",
+                          {}
+                      ).get(
+                          coin,
+                          {}
+                      )
+                  )
+
+
+              # ----------------------------------------------------
+              # P5 STATE
+              # ----------------------------------------------------
+
+              p5_state = p5_coin.get(
+                  "state"
+              )
+
+
+              p5_actionable = (
+                  p5_coin.get(
+                      "actionable_transition",
+                      False
+                  )
+              )
+
+
+              p5_imbalance = (
+                  p5_coin.get(
+                      "imbalance",
+                      {}
+                  )
+              )
+
+
+              p5_bid_wall = (
+                  p5_coin.get(
+                      "bid_wall",
+                      {}
+                  )
+              )
+
+
+              p5_ask_wall = (
+                  p5_coin.get(
+                      "ask_wall",
+                      {}
+                  )
+              )
+
+
+              p5_horizon = (
+                  p5_coin.get(
+                      "prediction_horizon",
+                      {}
+                  )
+              )
+
+
+              p5_evidence = (
+                  p5_coin.get(
+                      "evidence",
+                      {}
+                  )
+              )
+
+
+              # ----------------------------------------------------
+              # DECISION
+              # ----------------------------------------------------
+
+              # IMPORTANT:
+              #
+              # GitHub remains an evidence layer.
+              #
+              # P5 V2 does NOT directly create
+              # BUY / SELL decisions here.
+              #
+              # Final decision remains outside
+              # this workflow and requires:
+              #
+              # Paribu
+              # + P5 V2
+              # + Event/Lifecycle
+              # + Binance
+              # + OKX
+              #
+              # Therefore decision remains DEFERRED.
+
+
               output["coins"][coin] = {
 
-                  "price": price,
+                  # ------------------------------------------------
+                  # CURRENT MARKET
+                  # ------------------------------------------------
 
-                  "volume": volume,
+                  "price":
+                      price,
 
-                  "orderbook_pressure": pressure,
+                  "volume":
+                      volume,
 
-                  "last_event": event.get(
-                      "event"
-                  ),
+                  "orderbook_pressure":
+                      pressure,
 
-                  "event_detected_at": event.get(
-                      "detected_at"
-                  ),
 
-                  "event_fetched_at": event.get(
-                      "fetched_at"
-                  ),
+                  # ------------------------------------------------
+                  # EXISTING EVENT EVIDENCE
+                  # ------------------------------------------------
 
-                  "event_previous_state": event.get(
-                      "previous_state"
-                  ),
+                  "last_event":
+                      event.get(
+                          "event"
+                      ),
 
-                  "event_current_state": event.get(
-                      "current_state"
-                  ),
+                  "event_detected_at":
+                      event.get(
+                          "detected_at"
+                      ),
 
-                  "event_reason": event.get(
-                      "reason"
-                  ),
+                  "event_fetched_at":
+                      event.get(
+                          "fetched_at"
+                      ),
 
-                  "lifecycle_state": lifecycle_item.get(
-                      "state",
-                      "UNKNOWN"
-                  ),
+                  "event_previous_state":
+                      event.get(
+                          "previous_state"
+                      ),
 
-                  "lifecycle_updated_at": (
+                  "event_current_state":
+                      event.get(
+                          "current_state"
+                      ),
+
+                  "event_reason":
+                      event.get(
+                          "reason"
+                      ),
+
+
+                  # ------------------------------------------------
+                  # EXISTING LIFECYCLE
+                  # ------------------------------------------------
+
+                  "lifecycle_state":
+                      lifecycle_item.get(
+                          "state",
+                          "UNKNOWN"
+                      ),
+
+                  "lifecycle_updated_at":
                       lifecycle_item.get(
                           "updated_at"
-                      )
-                  ),
+                      ),
 
-                  "last_evidence_event": (
+                  "last_evidence_event":
                       lifecycle_item.get(
                           "last_evidence_event"
-                      )
-                  ),
+                      ),
 
-                  "last_evidence_at": (
+                  "last_evidence_at":
                       lifecycle_item.get(
                           "last_evidence_at"
+                      ),
+
+
+                  # ------------------------------------------------
+                  # P5 V2
+                  # ------------------------------------------------
+
+                  "p5_v2": {
+
+                      "available":
+                          p5_available,
+
+                      "state":
+                          p5_state,
+
+                      "actionable_transition":
+                          p5_actionable,
+
+                      "imbalance":
+                          p5_imbalance,
+
+                      "bid_wall":
+                          p5_bid_wall,
+
+                      "ask_wall":
+                          p5_ask_wall,
+
+                      "prediction_horizon":
+                          p5_horizon,
+
+                      "evidence":
+                          p5_evidence,
+                  },
+
+
+                  # ------------------------------------------------
+                  # DECISION
+                  # ------------------------------------------------
+
+                  "decision":
+                      "DEFERRED",
+
+                  "decision_reason":
+                      (
+                          "Local evidence prepared. "
+                          "P5 V2 is included as an "
+                          "additional evidence layer. "
+                          "Final decision requires "
+                          "Paribu + P5 V2 + "
+                          "Binance + OKX "
+                          "combined analysis."
                       )
-                  ),
-
-                  # Explicitly prevent this layer
-                  # from pretending to make a trade decision.
-                  "decision": "DEFERRED",
-
-                  "decision_reason": (
-                      "Local evidence prepared. "
-                      "Final decision requires "
-                      "Paribu + Binance + OKX "
-                      "combined analysis."
-                  )
               }
 
-          # =========================================================
+
+          # ========================================================
           # WRITE
-          # =========================================================
+          # ========================================================
 
           output_path.parent.mkdir(
               parents=True,
               exist_ok=True
           )
+
 
           output_path.write_text(
               json.dumps(
@@ -408,48 +831,117 @@ jobs:
               encoding="utf-8"
           )
 
-          print(
-              "========================================"
-          )
 
-          print(
-              "LOCAL EVIDENCE SNAPSHOT"
-          )
+          # ========================================================
+          # CONSOLE OUTPUT
+          # ========================================================
 
           print(
               "========================================"
           )
 
-          for coin, item in output["coins"].items():
+          print(
+              "LOCAL EVIDENCE SNAPSHOT + P5 V2"
+          )
+
+          print(
+              "========================================"
+          )
+
+
+          print(
+              f"P5 V2 available: "
+              f"{p5_available}"
+          )
+
+
+          print(
+              f"P5 V2 snapshot: "
+              f"{p5_snapshot_at}"
+          )
+
+
+          print(
+              f"Paribu snapshot: "
+              f"{fetched_at}"
+          )
+
+
+          print()
+
+
+          for coin, item in output[
+              "coins"
+          ].items():
+
+              p5_item = item.get(
+                  "p5_v2",
+                  {}
+              )
+
 
               print(
+
                   f"{coin}: "
                   f"event={item['last_event']} | "
                   f"lifecycle={item['lifecycle_state']} | "
                   f"pressure={item['orderbook_pressure']} | "
+                  f"P5={p5_item.get('state')} | "
+                  f"P5_actionable="
+                  f"{p5_item.get('actionable_transition')} | "
                   f"decision=DEFERRED"
+
               )
 
+
           print()
+
           print(
               "Final decision authority remains "
               "outside GitHub."
           )
 
+
+      # ============================================================
+      # COMMIT DECISION EVIDENCE
+      # ============================================================
+
       - name: Commit local evidence
         shell: bash
         run: |
+
           set -euo pipefail
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git config user.name \
+            "github-actions[bot]"
+
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
 
           git add state/decision.json
 
+
           if git diff --cached --quiet; then
-            echo "No local evidence changes."
+
+            echo \
+              "No local evidence changes."
+
             exit 0
+
           fi
 
-          git commit -m "Update local evidence snapshot"
+
+          git commit \
+            -m "Integrate P5 V2 evidence"
+
+
+          git fetch origin main
+
+
+          git rebase origin/main
+
+
           git push origin HEAD:main
