@@ -26,16 +26,8 @@ jobs:
 
     steps:
 
-      # ============================================================
-      # CHECKOUT
-      # ============================================================
-
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      # ============================================================
-      # P5 V2
-      # ============================================================
 
       - name: Calculate P5 V2
         shell: python
@@ -45,9 +37,10 @@ jobs:
           from pathlib import Path
           from datetime import datetime, timezone
 
-          # ========================================================
-          # P5 V2 — FROZEN SPECIFICATION
-          # ========================================================
+
+          # ============================================================
+          # P5 V2 — FROZEN OPERATIONAL SPECIFICATION
+          # ============================================================
 
           COINS = {
               "VIRTUAL": "virtual_tl",
@@ -56,49 +49,59 @@ jobs:
               "ATH": "ath_tl",
           }
 
-          # --------------------------------------------------------
+          # ------------------------------------------------------------
           # 1. NEAR-BOOK IMBALANCE
-          # --------------------------------------------------------
+          # ------------------------------------------------------------
 
           IMBALANCE_THRESHOLD = 0.25
 
-          # --------------------------------------------------------
+          # ------------------------------------------------------------
           # 2. WALL MATERIALITY
-          # --------------------------------------------------------
+          #
+          # Materiality is measured against the liquidity
+          # on the SAME side of the book.
+          #
+          # Bid wall:
+          #     wall_notional / total_near_bid_notional
+          #
+          # Ask wall:
+          #     wall_notional / total_near_ask_notional
+          # ------------------------------------------------------------
 
           MATERIALITY_THRESHOLD = 0.60
           DOMINANT_MATERIALITY = 0.75
 
-          # --------------------------------------------------------
+          # ------------------------------------------------------------
           # 3. DISTANCE
-          # --------------------------------------------------------
+          # ------------------------------------------------------------
 
           PRIMARY_DISTANCE = 0.005
           MIGRATION_DISTANCE = 0.010
 
-          # --------------------------------------------------------
+          # ------------------------------------------------------------
           # 4. PERSISTENCE
-          # --------------------------------------------------------
+          # ------------------------------------------------------------
 
           PERSISTENCE_CANDIDATE = 2
           PERSISTENCE_CONFIRMED = 3
 
-          # --------------------------------------------------------
+          # ------------------------------------------------------------
           # 5. MIGRATION
-          # --------------------------------------------------------
+          # ------------------------------------------------------------
 
           MIGRATION_DISPLACEMENT = 0.0025
 
-          # --------------------------------------------------------
-          # PREDICTION HORIZON
-          # --------------------------------------------------------
+          # ------------------------------------------------------------
+          # 6. PREDICTION HORIZON
+          # ------------------------------------------------------------
 
           PREDICTION_HORIZON = 3
           SNAPSHOT_INTERVAL_MINUTES = 15
 
-          # ========================================================
+
+          # ============================================================
           # PATHS
-          # ========================================================
+          # ============================================================
 
           latest_path = Path(
               "data/latest.json"
@@ -112,9 +115,10 @@ jobs:
               "state/p5_v2.json"
           )
 
-          # ========================================================
+
+          # ============================================================
           # HELPERS
-          # ========================================================
+          # ============================================================
 
           def number(value):
 
@@ -146,6 +150,19 @@ jobs:
                   return None
 
 
+          def level_price(level):
+
+              if (
+                  not isinstance(level, list)
+                  or len(level) < 1
+              ):
+                  return None
+
+              return number(
+                  level[0]
+              )
+
+
           def level_notional(level):
 
               if (
@@ -163,22 +180,7 @@ jobs:
               ):
                   return None
 
-              return (
-                  price * quantity
-              )
-
-
-          def level_price(level):
-
-              if (
-                  not isinstance(level, list)
-                  or not level
-              ):
-                  return None
-
-              return number(
-                  level[0]
-              )
+              return price * quantity
 
 
           def calculate_distance(
@@ -215,9 +217,9 @@ jobs:
               ) / old_price
 
 
-          # ========================================================
-          # ORDERBOOK METRIC CALCULATION
-          # ========================================================
+          # ============================================================
+          # ORDERBOOK METRICS
+          # ============================================================
 
           def calculate_metrics(
               market_snapshot
@@ -229,18 +231,14 @@ jobs:
               ):
                   return None
 
-              bids = (
-                  market_snapshot.get(
-                      "bids",
-                      []
-                  )
+              bids = market_snapshot.get(
+                  "bids",
+                  []
               )
 
-              asks = (
-                  market_snapshot.get(
-                      "asks",
-                      []
-                  )
+              asks = market_snapshot.get(
+                  "asks",
+                  []
               )
 
               last = number(
@@ -249,8 +247,12 @@ jobs:
                   )
               )
 
-              if not bids or not asks:
+              if (
+                  not bids
+                  or not asks
+              ):
                   return None
+
 
               best_bid = level_price(
                   bids[0]
@@ -259,6 +261,7 @@ jobs:
               best_ask = level_price(
                   asks[0]
               )
+
 
               if (
                   best_bid is not None
@@ -274,32 +277,35 @@ jobs:
 
                   mid = last
 
+
               if (
                   mid is None
                   or mid <= 0
               ):
                   return None
 
-              # ----------------------------------------------------
-              # PRIMARY BAND = 0.5%
-              # TRACKING BAND = 1.0%
-              # ----------------------------------------------------
+
+              # --------------------------------------------------------
+              # PRIMARY BOOK
+              # 0.5% from mid
+              # --------------------------------------------------------
 
               primary_bids = []
               primary_asks = []
 
+              # --------------------------------------------------------
+              # TRACKING BOOK
+              # 1.0% from mid
+              # --------------------------------------------------------
+
               tracking_bids = []
               tracking_asks = []
 
+
               for level in bids:
 
-                  price = level_price(
-                      level
-                  )
-
-                  notional = level_notional(
-                      level
-                  )
+                  price = level_price(level)
+                  notional = level_notional(level)
 
                   if (
                       price is None
@@ -341,15 +347,11 @@ jobs:
                           }
                       )
 
+
               for level in asks:
 
-                  price = level_price(
-                      level
-                  )
-
-                  notional = level_notional(
-                      level
-                  )
+                  price = level_price(level)
+                  notional = level_notional(level)
 
                   if (
                       price is None
@@ -391,9 +393,10 @@ jobs:
                           }
                       )
 
-              # ----------------------------------------------------
-              # NEAR-BOOK TOTALS
-              # ----------------------------------------------------
+
+              # --------------------------------------------------------
+              # SIDE-SPECIFIC TOTALS
+              # --------------------------------------------------------
 
               bid_total = sum(
                   item["notional"]
@@ -405,12 +408,17 @@ jobs:
                   for item in primary_asks
               )
 
-              total = (
+
+              # --------------------------------------------------------
+              # IMBALANCE
+              # --------------------------------------------------------
+
+              combined_total = (
                   bid_total
                   + ask_total
               )
 
-              if total <= 0:
+              if combined_total <= 0:
 
                   imbalance = None
 
@@ -419,15 +427,22 @@ jobs:
                   imbalance = (
                       bid_total
                       - ask_total
-                  ) / total
+                  ) / combined_total
 
-              # ----------------------------------------------------
-              # MATERIALITY
-              # ----------------------------------------------------
 
-              def enrich(
-                  walls
-              ):
+              # --------------------------------------------------------
+              # SIDE-SPECIFIC MATERIALITY
+              #
+              # THIS IS THE IMPORTANT FIX.
+              #
+              # Bid materiality:
+              #     bid wall / ALL near-book bid liquidity
+              #
+              # Ask materiality:
+              #     ask wall / ALL near-book ask liquidity
+              # --------------------------------------------------------
+
+              def enrich_bid(walls):
 
                   result = []
 
@@ -435,8 +450,8 @@ jobs:
 
                       materiality = (
                           wall["notional"]
-                          / total
-                          if total > 0
+                          / bid_total
+                          if bid_total > 0
                           else None
                       )
 
@@ -446,9 +461,7 @@ jobs:
                           >= DOMINANT_MATERIALITY
                       ):
 
-                          wall_class = (
-                              "DOMINANT"
-                          )
+                          wall_class = "DOMINANT"
 
                       elif (
                           materiality is not None
@@ -456,15 +469,12 @@ jobs:
                           >= MATERIALITY_THRESHOLD
                       ):
 
-                          wall_class = (
-                              "MATERIAL"
-                          )
+                          wall_class = "MATERIAL"
 
                       else:
 
-                          wall_class = (
-                              "ORDINARY"
-                          )
+                          wall_class = "ORDINARY"
+
 
                       result.append(
                           {
@@ -478,17 +488,65 @@ jobs:
 
                   return result
 
-              primary_bids = enrich(
+
+              def enrich_ask(walls):
+
+                  result = []
+
+                  for wall in walls:
+
+                      materiality = (
+                          wall["notional"]
+                          / ask_total
+                          if ask_total > 0
+                          else None
+                      )
+
+                      if (
+                          materiality is not None
+                          and materiality
+                          >= DOMINANT_MATERIALITY
+                      ):
+
+                          wall_class = "DOMINANT"
+
+                      elif (
+                          materiality is not None
+                          and materiality
+                          >= MATERIALITY_THRESHOLD
+                      ):
+
+                          wall_class = "MATERIAL"
+
+                      else:
+
+                          wall_class = "ORDINARY"
+
+
+                      result.append(
+                          {
+                              **wall,
+                              "materiality":
+                                  materiality,
+                              "class":
+                                  wall_class,
+                          }
+                      )
+
+                  return result
+
+
+              primary_bids = enrich_bid(
                   primary_bids
               )
 
-              primary_asks = enrich(
-                  primary_asks
-              )
+              primary_asks = enrich_ask(
+                  primary_asks )
 
-              # ----------------------------------------------------
+
+              # --------------------------------------------------------
               # STRONGEST MATERIAL WALL
-              # ----------------------------------------------------
+              # --------------------------------------------------------
 
               material_bids = [
                   item
@@ -512,6 +570,7 @@ jobs:
                   )
               ]
 
+
               strongest_bid = (
                   max(
                       material_bids,
@@ -521,6 +580,7 @@ jobs:
                   if material_bids
                   else None
               )
+
 
               strongest_ask = (
                   max(
@@ -532,29 +592,44 @@ jobs:
                   else None
               )
 
+
               return {
-                  "mid": mid,
-                  "imbalance": imbalance,
-                  "bid_total": bid_total,
-                  "ask_total": ask_total,
+
+                  "mid":
+                      mid,
+
+                  "imbalance":
+                      imbalance,
+
+                  "bid_total":
+                      bid_total,
+
+                  "ask_total":
+                      ask_total,
+
                   "primary_bids":
                       primary_bids,
+
                   "primary_asks":
                       primary_asks,
+
                   "tracking_bids":
                       tracking_bids,
+
                   "tracking_asks":
                       tracking_asks,
+
                   "strongest_bid":
                       strongest_bid,
+
                   "strongest_ask":
                       strongest_ask,
               }
 
 
-          # ========================================================
-          # LOAD CURRENT SNAPSHOT
-          # ========================================================
+          # ============================================================
+          # CURRENT SNAPSHOT
+          # ============================================================
 
           latest = load_json(
               latest_path
@@ -566,11 +641,13 @@ jobs:
                   "P5 V2: data/latest.json okunamadı."
               )
 
+
           if latest.get("ok") is not True:
 
               raise SystemExit(
                   "P5 V2: Paribu snapshot geçerli değil."
               )
+
 
           fetched_at = latest.get(
               "fetched_at"
@@ -581,6 +658,7 @@ jobs:
               raise SystemExit(
                   "P5 V2: fetched_at bulunamadı."
               )
+
 
           try:
 
@@ -597,6 +675,7 @@ jobs:
                   "P5 V2: fetched_at formatı geçersiz."
               )
 
+
           now = datetime.now(
               timezone.utc
           )
@@ -605,9 +684,6 @@ jobs:
               now - fetched_dt
           ).total_seconds()
 
-          # --------------------------------------------------------
-          # DATA HEALTH
-          # --------------------------------------------------------
 
           if age_seconds < -300:
 
@@ -615,17 +691,20 @@ jobs:
                   "P5 V2: gelecek zamanlı snapshot."
               )
 
+
           if age_seconds > 45 * 60:
 
               raise SystemExit(
                   "P5 V2: snapshot stale."
               )
 
-          # ========================================================
-          # LOAD ORDERBOOK HISTORY
-          # ========================================================
+
+          # ============================================================
+          # ORDERBOOK HISTORY
+          # ============================================================
 
           snapshots = []
+
 
           if orderbook_dir.exists():
 
@@ -648,22 +727,19 @@ jobs:
                               line
                           )
 
-                          if isinstance(
-                              row,
-                              dict
-                          ):
-
-                              snapshots.append(
-                                  row
-                              )
-
                       except json.JSONDecodeError:
 
                           continue
 
-          # --------------------------------------------------------
-          # SORT
-          # --------------------------------------------------------
+                      if isinstance(
+                          row,
+                          dict
+                      ):
+
+                          snapshots.append(
+                              row
+                          )
+
 
           snapshots.sort(
               key=lambda row:
@@ -673,13 +749,14 @@ jobs:
                   )
           )
 
-          # --------------------------------------------------------
-          # DEDUPLICATE BY fetched_at
-          # --------------------------------------------------------
+
+          # ============================================================
+          # DEDUPLICATION
+          # ============================================================
 
           deduplicated = []
-
           seen = set()
+
 
           for snapshot in snapshots:
 
@@ -699,11 +776,9 @@ jobs:
                   snapshot
               )
 
+
           snapshots = deduplicated
 
-          # --------------------------------------------------------
-          # EXCLUDE CURRENT SNAPSHOT
-          # --------------------------------------------------------
 
           historical_snapshots = [
               snapshot
@@ -713,14 +788,14 @@ jobs:
               ) != fetched_at
           ]
 
-          # ========================================================
-          # PERSISTENCE / WALL MATCHING
-          # ========================================================
+
+          # ============================================================
+          # PERSISTENCE
+          # ============================================================
 
           def wall_matches(
               previous_wall,
-              current_wall,
-              current_mid
+              current_wall
           ):
 
               if (
@@ -742,11 +817,6 @@ jobs:
                   or new_price is None
               ):
                   return False
-
-              # A wall is considered the same
-              # tracked wall when its new price
-              # remains within the migration
-              # tracking displacement band.
 
               movement = displacement(
                   old_price,
@@ -771,8 +841,8 @@ jobs:
                   return 0
 
               count = 0
-
               previous_wall = None
+
 
               for metrics in reversed(
                   historical_metrics
@@ -782,57 +852,60 @@ jobs:
                       f"strongest_{side}"
                   )
 
+
                   if wall is None:
                       break
 
-                  if (
-                      wall.get(
-                          "materiality"
-                      ) is None
-                  ):
-                      break
+
+                  materiality = wall.get(
+                      "materiality"
+                  )
+
 
                   if (
-                      wall["materiality"]
+                      materiality is None
+                      or materiality
                       < MATERIALITY_THRESHOLD
                   ):
                       break
 
-                  if (
-                      previous_wall is not None
-                  ):
+
+                  if previous_wall is not None:
 
                       if not wall_matches(
                           wall,
-                          previous_wall,
-                          metrics.get(
-                              "mid"
-                          )
+                          previous_wall
                       ):
 
                           break
+
 
                   previous_wall = wall
 
                   count += 1
 
+
                   if count >= 20:
                       break
+
 
               return count
 
 
-          # ========================================================
-          # BUILD P5 OUTPUT
-          # ========================================================
+          # ============================================================
+          # OUTPUT
+          # ============================================================
 
           output = {
 
-              "model": "P5",
+              "model":
+                  "P5",
 
-              "version": "V2",
+              "version":
+                  "V2",
 
-              "status": "FROZEN",
+              "status":
+                  "FROZEN",
 
               "generated_at":
                   datetime.now(
@@ -899,25 +972,33 @@ jobs:
                           PREDICTION_HORIZON
                           * SNAPSHOT_INTERVAL_MINUTES
                       ),
+
+                  "materiality_basis":
+                      "same_side_near_book",
               },
 
-              "coins": {},
+              "coins":
+                  {},
           }
 
-          # ========================================================
+
+          # ============================================================
           # COIN ANALYSIS
-          # ========================================================
+          # ============================================================
 
           for coin, market in COINS.items():
 
               current_market = (
-                  latest.get(
+                  latest
+                  .get(
                       "markets",
                       {}
-                  ).get(
+                  )
+                  .get(
                       market
                   )
               )
+
 
               if not current_market:
 
@@ -932,45 +1013,56 @@ jobs:
 
                   continue
 
-              current_metrics = (
-                  calculate_metrics(
-                      {
-                          "last":
-                              (
-                                  current_market
-                                  .get(
-                                      "ticker",
-                                      [{}]
-                                  )[0]
-                                  .get(
-                                      "last"
-                                  )
-                              ),
 
-                          "bids":
-                              current_market
-                              .get(
-                                  "orderbook",
-                                  {}
-                              )
-                              .get(
-                                  "bids",
-                                  []
-                              ),
-
-                          "asks":
-                              current_market
-                              .get(
-                                  "orderbook",
-                                  {}
-                              )
-                              .get(
-                                  "asks",
-                                  []
-                              ),
-                      }
+              ticker = (
+                  current_market
+                  .get(
+                      "ticker",
+                      []
                   )
               )
+
+
+              last = None
+
+
+              if ticker:
+
+                  last = ticker[0].get(
+                      "last"
+                  )
+
+
+              current_metrics = calculate_metrics(
+                  {
+
+                      "last":
+                          last,
+
+                      "bids":
+                          current_market
+                          .get(
+                              "orderbook",
+                              {}
+                          )
+                          .get(
+                              "bids",
+                              []
+                          ),
+
+                      "asks":
+                          current_market
+                          .get(
+                              "orderbook",
+                              {}
+                          )
+                          .get(
+                              "asks",
+                              []
+                          ),
+                  }
+              )
+
 
               if current_metrics is None:
 
@@ -985,15 +1077,15 @@ jobs:
 
                   continue
 
-              # ----------------------------------------------------
+
+              # --------------------------------------------------------
               # HISTORICAL METRICS
-              # ----------------------------------------------------
+              # --------------------------------------------------------
 
               historical_metrics = []
 
-              for snapshot in (
-                  historical_snapshots
-              ):
+
+              for snapshot in historical_snapshots:
 
                   market_data = (
                       snapshot
@@ -1006,12 +1098,15 @@ jobs:
                       )
                   )
 
+
                   if not market_data:
                       continue
+
 
                   metrics = calculate_metrics(
                       market_data
                   )
+
 
                   if metrics is not None:
 
@@ -1021,10 +1116,12 @@ jobs:
                                   snapshot.get(
                                       "fetched_at"
                                   ),
+
                               "metrics":
                                   metrics,
                           }
                       )
+
 
               metrics_only = [
                   item["metrics"]
@@ -1032,9 +1129,6 @@ jobs:
                   in historical_metrics
               ]
 
-              # ----------------------------------------------------
-              # PREVIOUS
-              # ----------------------------------------------------
 
               previous_metrics = (
                   metrics_only[-1]
@@ -1042,9 +1136,10 @@ jobs:
                   else None
               )
 
-              # ----------------------------------------------------
+
+              # --------------------------------------------------------
               # IMBALANCE
-              # ----------------------------------------------------
+              # --------------------------------------------------------
 
               imbalance = (
                   current_metrics[
@@ -1052,39 +1147,33 @@ jobs:
                   ]
               )
 
+
               if imbalance is None:
 
-                  imbalance_state = (
-                      "NEUTRAL"
-                  )
+                  imbalance_state = "NEUTRAL"
 
               elif (
                   imbalance
                   > IMBALANCE_THRESHOLD
               ):
 
-                  imbalance_state = (
-                      "DEMAND"
-                  )
+                  imbalance_state = "DEMAND"
 
               elif (
                   imbalance
                   < -IMBALANCE_THRESHOLD
               ):
 
-                  imbalance_state = (
-                      "SUPPLY"
-                  )
+                  imbalance_state = "SUPPLY"
 
               else:
 
-                  imbalance_state = (
-                      "NEUTRAL"
-                  )
+                  imbalance_state = "NEUTRAL"
 
-              # ----------------------------------------------------
+
+              # --------------------------------------------------------
               # WALLS
-              # ----------------------------------------------------
+              # --------------------------------------------------------
 
               bid_wall = (
                   current_metrics[
@@ -1098,6 +1187,7 @@ jobs:
                   ]
               )
 
+
               bid_distance = (
                   bid_wall["distance"]
                   if bid_wall
@@ -1109,6 +1199,7 @@ jobs:
                   if ask_wall
                   else None
               )
+
 
               bid_materiality = (
                   bid_wall["materiality"]
@@ -1122,27 +1213,25 @@ jobs:
                   else None
               )
 
-              # ----------------------------------------------------
+
+              # --------------------------------------------------------
               # PERSISTENCE
-              # ----------------------------------------------------
+              # --------------------------------------------------------
 
-              bid_persistence = (
-                  calculate_persistence(
-                      metrics_only,
-                      "bid"
-                  )
+              bid_persistence = calculate_persistence(
+                  metrics_only,
+                  "bid"
               )
 
-              ask_persistence = (
-                  calculate_persistence(
-                      metrics_only,
-                      "ask"
-                  )
+              ask_persistence = calculate_persistence(
+                  metrics_only,
+                  "ask"
               )
 
-              # ----------------------------------------------------
+
+              # --------------------------------------------------------
               # PREVIOUS WALLS
-              # ----------------------------------------------------
+              # --------------------------------------------------------
 
               previous_bid = (
                   previous_metrics[
@@ -1160,45 +1249,42 @@ jobs:
                   else None
               )
 
-              # ----------------------------------------------------
-              # CURRENT WALL MOVEMENT
-              # ----------------------------------------------------
 
-              bid_displacement = (
-                  displacement(
-                      previous_bid[
-                          "price"
-                      ]
+              # --------------------------------------------------------
+              # WALL DISPLACEMENT
+              # --------------------------------------------------------
+
+              bid_displacement = displacement(
+                  (
+                      previous_bid["price"]
                       if previous_bid
-                      else None,
-
-                      bid_wall[
-                          "price"
-                      ]
+                      else None
+                  ),
+                  (
+                      bid_wall["price"]
                       if bid_wall
-                      else None,
+                      else None
                   )
               )
 
-              ask_displacement = (
-                  displacement(
-                      previous_ask[
-                          "price"
-                      ]
+
+              ask_displacement = displacement(
+                  (
+                      previous_ask["price"]
                       if previous_ask
-                      else None,
-
-                      ask_wall[
-                          "price"
-                      ]
+                      else None
+                  ),
+                  (
+                      ask_wall["price"]
                       if ask_wall
-                      else None,
+                      else None
                   )
               )
 
-              # ----------------------------------------------------
+
+              # --------------------------------------------------------
               # MIGRATION
-              # ----------------------------------------------------
+              # --------------------------------------------------------
 
               bid_migration = (
 
@@ -1222,6 +1308,7 @@ jobs:
                       >= MIGRATION_DISPLACEMENT
               )
 
+
               ask_migration = (
 
                   ask_wall is not None
@@ -1244,9 +1331,10 @@ jobs:
                       >= MIGRATION_DISPLACEMENT
               )
 
-              # ----------------------------------------------------
+
+              # --------------------------------------------------------
               # RESOLUTION
-              # ----------------------------------------------------
+              # --------------------------------------------------------
 
               bid_resolution = (
 
@@ -1255,6 +1343,7 @@ jobs:
                   and bid_wall is None
               )
 
+
               ask_resolution = (
 
                   previous_ask is not None
@@ -1262,9 +1351,10 @@ jobs:
                   and ask_wall is None
               )
 
-              # ----------------------------------------------------
+
+              # --------------------------------------------------------
               # CONFIRMED PERSISTENCE
-              # ----------------------------------------------------
+              # --------------------------------------------------------
 
               bid_confirmed = (
                   bid_persistence
@@ -1276,9 +1366,10 @@ jobs:
                   >= PERSISTENCE_CONFIRMED
               )
 
-              # ----------------------------------------------------
+
+              # --------------------------------------------------------
               # STRUCTURE
-              # ----------------------------------------------------
+              # --------------------------------------------------------
 
               bullish_structure = (
 
@@ -1295,6 +1386,7 @@ jobs:
                   and bid_confirmed
               )
 
+
               bearish_structure = (
 
                   imbalance_state
@@ -1310,48 +1402,52 @@ jobs:
                   and ask_confirmed
               )
 
-              # ----------------------------------------------------
+
+              # --------------------------------------------------------
               # EXPANSION
-              # ----------------------------------------------------
+              # --------------------------------------------------------
 
               bullish_expansion = (
 
                   bullish_structure
 
                   and (
-
                       ask_resolution
-
                       or ask_migration
                   )
               )
+
 
               bearish_expansion = (
 
                   bearish_structure
 
                   and (
-
                       bid_resolution
-
                       or bid_migration
                   )
               )
 
-              # ----------------------------------------------------
+
+              # --------------------------------------------------------
               # WEAKENING
-              # ----------------------------------------------------
+              # --------------------------------------------------------
+
+              previous_imbalance = (
+                  previous_metrics.get(
+                      "imbalance"
+                  )
+                  if previous_metrics
+                  else None
+              )
+
 
               bullish_weakening = (
 
-                  previous_metrics is not None
+                  previous_imbalance is not None
 
-                  and (
-                      previous_metrics.get(
-                          "imbalance"
-                      ) or 0
-                  )
-                  > IMBALANCE_THRESHOLD
+                  and previous_imbalance
+                      > IMBALANCE_THRESHOLD
 
                   and (
                       imbalance is None
@@ -1360,16 +1456,13 @@ jobs:
                   )
               )
 
+
               bearish_weakening = (
 
-                  previous_metrics is not None
+                  previous_imbalance is not None
 
-                  and (
-                      previous_metrics.get(
-                          "imbalance"
-                      ) or 0
-                  )
-                  < -IMBALANCE_THRESHOLD
+                  and previous_imbalance
+                      < -IMBALANCE_THRESHOLD
 
                   and (
                       imbalance is None
@@ -1378,9 +1471,10 @@ jobs:
                   )
               )
 
-              # ----------------------------------------------------
+
+              # --------------------------------------------------------
               # STATE
-              # ----------------------------------------------------
+              # --------------------------------------------------------
 
               if bullish_expansion:
 
@@ -1408,33 +1502,25 @@ jobs:
 
               elif bullish_weakening:
 
-                  state = (
-                      "WEAKENING"
-                  )
+                  state = "WEAKENING"
 
               elif bearish_weakening:
 
-                  state = (
-                      "WEAKENING"
-                  )
+                  state = "WEAKENING"
 
               elif (
                   imbalance_state
                   == "DEMAND"
               ):
 
-                  state = (
-                      "DEMAND_BIAS"
-                  )
+                  state = "DEMAND_BIAS"
 
               elif (
                   imbalance_state
                   == "SUPPLY"
               ):
 
-                  state = (
-                      "SUPPLY_BIAS"
-                  )
+                  state = "SUPPLY_BIAS"
 
               elif (
                   bid_migration
@@ -1449,16 +1535,14 @@ jobs:
 
               else:
 
-                  state = (
-                      "NEUTRAL"
-                  )
+                  state = "NEUTRAL"
 
-              # ----------------------------------------------------
+
+              # --------------------------------------------------------
               # ACTIONABLE TRANSITION
-              # ----------------------------------------------------
+              # --------------------------------------------------------
 
               actionable_transition = (
-
                   state
                   in {
                       "BULLISH_EXPANSION",
@@ -1466,9 +1550,10 @@ jobs:
                   }
               )
 
-              # ----------------------------------------------------
+
+              # --------------------------------------------------------
               # OUTPUT
-              # ----------------------------------------------------
+              # --------------------------------------------------------
 
               output["coins"][coin] = {
 
@@ -1490,13 +1575,12 @@ jobs:
                           IMBALANCE_THRESHOLD,
                   },
 
+
                   "bid_wall": {
 
                       "price":
                           (
-                              bid_wall[
-                                  "price"
-                              ]
+                              bid_wall["price"]
                               if bid_wall
                               else None
                           ),
@@ -1506,9 +1590,7 @@ jobs:
 
                       "class":
                           (
-                              bid_wall[
-                                  "class"
-                              ]
+                              bid_wall["class"]
                               if bid_wall
                               else None
                           ),
@@ -1523,10 +1605,12 @@ jobs:
                           (
                               "CONFIRMED"
                               if bid_confirmed
+
                               else
                               "CANDIDATE"
                               if bid_persistence
                               >= PERSISTENCE_CANDIDATE
+
                               else
                               "OBSERVATION"
                           ),
@@ -1541,13 +1625,12 @@ jobs:
                           bid_resolution,
                   },
 
+
                   "ask_wall": {
 
                       "price":
                           (
-                              ask_wall[
-                                  "price"
-                              ]
+                              ask_wall["price"]
                               if ask_wall
                               else None
                           ),
@@ -1557,9 +1640,7 @@ jobs:
 
                       "class":
                           (
-                              ask_wall[
-                                  "class"
-                              ]
+                              ask_wall["class"]
                               if ask_wall
                               else None
                           ),
@@ -1574,10 +1655,12 @@ jobs:
                           (
                               "CONFIRMED"
                               if ask_confirmed
+
                               else
                               "CANDIDATE"
                               if ask_persistence
                               >= PERSISTENCE_CANDIDATE
+
                               else
                               "OBSERVATION"
                           ),
@@ -1592,6 +1675,7 @@ jobs:
                           ask_resolution,
                   },
 
+
                   "prediction_horizon": {
 
                       "snapshots":
@@ -1603,6 +1687,7 @@ jobs:
                               * SNAPSHOT_INTERVAL_MINUTES
                           ),
                   },
+
 
                   "evidence": {
 
@@ -1625,6 +1710,7 @@ jobs:
                           ask_confirmed,
                   },
 
+
                   "data": {
 
                       "historical_snapshots":
@@ -1634,14 +1720,16 @@ jobs:
                   },
               }
 
-          # ========================================================
-          # WRITE P5 STATE ONLY
-          # ========================================================
+
+          # ============================================================
+          # WRITE STATE
+          # ============================================================
 
           output_path.parent.mkdir(
               parents=True,
               exist_ok=True
           )
+
 
           output_path.write_text(
               json.dumps(
@@ -1652,9 +1740,11 @@ jobs:
               encoding="utf-8"
           )
 
+
           print(
               "P5 V2 completed successfully."
           )
+
 
           print(
               json.dumps(
@@ -1663,6 +1753,7 @@ jobs:
                   ensure_ascii=False
               )
           )
+
 
       # ============================================================
       # COMMIT ONLY P5 STATE
@@ -1691,7 +1782,7 @@ jobs:
           fi
 
           git commit \
-            -m "Add P5 V2 evidence state"
+            -m "Update P5 V2 materiality calibration"
 
           git fetch origin main
 
