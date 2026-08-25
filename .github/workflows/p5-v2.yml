@@ -1,0 +1,1700 @@
+name: P5 V2 Evidence Engine
+
+on:
+  workflow_run:
+    workflows:
+      - "Adaptive Event Detector"
+    types:
+      - completed
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p5-v2
+  cancel-in-progress: false
+
+jobs:
+  p5:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # P5 V2
+      # ============================================================
+
+      - name: Calculate P5 V2
+        shell: python
+        run: |
+
+          import json
+          from pathlib import Path
+          from datetime import datetime, timezone
+
+          # ========================================================
+          # P5 V2 — FROZEN SPECIFICATION
+          # ========================================================
+
+          COINS = {
+              "VIRTUAL": "virtual_tl",
+              "FET": "fet_tl",
+              "KITE": "kite_tl",
+              "ATH": "ath_tl",
+          }
+
+          # --------------------------------------------------------
+          # 1. NEAR-BOOK IMBALANCE
+          # --------------------------------------------------------
+
+          IMBALANCE_THRESHOLD = 0.25
+
+          # --------------------------------------------------------
+          # 2. WALL MATERIALITY
+          # --------------------------------------------------------
+
+          MATERIALITY_THRESHOLD = 0.60
+          DOMINANT_MATERIALITY = 0.75
+
+          # --------------------------------------------------------
+          # 3. DISTANCE
+          # --------------------------------------------------------
+
+          PRIMARY_DISTANCE = 0.005
+          MIGRATION_DISTANCE = 0.010
+
+          # --------------------------------------------------------
+          # 4. PERSISTENCE
+          # --------------------------------------------------------
+
+          PERSISTENCE_CANDIDATE = 2
+          PERSISTENCE_CONFIRMED = 3
+
+          # --------------------------------------------------------
+          # 5. MIGRATION
+          # --------------------------------------------------------
+
+          MIGRATION_DISPLACEMENT = 0.0025
+
+          # --------------------------------------------------------
+          # PREDICTION HORIZON
+          # --------------------------------------------------------
+
+          PREDICTION_HORIZON = 3
+          SNAPSHOT_INTERVAL_MINUTES = 15
+
+          # ========================================================
+          # PATHS
+          # ========================================================
+
+          latest_path = Path(
+              "data/latest.json"
+          )
+
+          orderbook_dir = Path(
+              "orderbook_history"
+          )
+
+          output_path = Path(
+              "state/p5_v2.json"
+          )
+
+          # ========================================================
+          # HELPERS
+          # ========================================================
+
+          def number(value):
+
+              try:
+                  return float(value)
+
+              except (
+                  TypeError,
+                  ValueError
+              ):
+                  return None
+
+
+          def load_json(path):
+
+              try:
+
+                  return json.loads(
+                      path.read_text(
+                          encoding="utf-8"
+                      )
+                  )
+
+              except (
+                  OSError,
+                  json.JSONDecodeError
+              ):
+
+                  return None
+
+
+          def level_notional(level):
+
+              if (
+                  not isinstance(level, list)
+                  or len(level) < 2
+              ):
+                  return None
+
+              price = number(level[0])
+              quantity = number(level[1])
+
+              if (
+                  price is None
+                  or quantity is None
+              ):
+                  return None
+
+              return (
+                  price * quantity
+              )
+
+
+          def level_price(level):
+
+              if (
+                  not isinstance(level, list)
+                  or not level
+              ):
+                  return None
+
+              return number(
+                  level[0]
+              )
+
+
+          def calculate_distance(
+              price,
+              mid
+          ):
+
+              if (
+                  price is None
+                  or mid is None
+                  or mid <= 0
+              ):
+                  return None
+
+              return abs(
+                  price - mid
+              ) / mid
+
+
+          def displacement(
+              old_price,
+              new_price
+          ):
+
+              if (
+                  old_price is None
+                  or new_price is None
+                  or old_price <= 0
+              ):
+                  return None
+
+              return abs(
+                  new_price - old_price
+              ) / old_price
+
+
+          # ========================================================
+          # ORDERBOOK METRIC CALCULATION
+          # ========================================================
+
+          def calculate_metrics(
+              market_snapshot
+          ):
+
+              if not isinstance(
+                  market_snapshot,
+                  dict
+              ):
+                  return None
+
+              bids = (
+                  market_snapshot.get(
+                      "bids",
+                      []
+                  )
+              )
+
+              asks = (
+                  market_snapshot.get(
+                      "asks",
+                      []
+                  )
+              )
+
+              last = number(
+                  market_snapshot.get(
+                      "last"
+                  )
+              )
+
+              if not bids or not asks:
+                  return None
+
+              best_bid = level_price(
+                  bids[0]
+              )
+
+              best_ask = level_price(
+                  asks[0]
+              )
+
+              if (
+                  best_bid is not None
+                  and best_ask is not None
+              ):
+
+                  mid = (
+                      best_bid
+                      + best_ask
+                  ) / 2
+
+              else:
+
+                  mid = last
+
+              if (
+                  mid is None
+                  or mid <= 0
+              ):
+                  return None
+
+              # ----------------------------------------------------
+              # PRIMARY BAND = 0.5%
+              # TRACKING BAND = 1.0%
+              # ----------------------------------------------------
+
+              primary_bids = []
+              primary_asks = []
+
+              tracking_bids = []
+              tracking_asks = []
+
+              for level in bids:
+
+                  price = level_price(
+                      level
+                  )
+
+                  notional = level_notional(
+                      level
+                  )
+
+                  if (
+                      price is None
+                      or notional is None
+                  ):
+                      continue
+
+                  distance = calculate_distance(
+                      price,
+                      mid
+                  )
+
+                  if distance is None:
+                      continue
+
+                  if (
+                      distance
+                      <= PRIMARY_DISTANCE
+                  ):
+
+                      primary_bids.append(
+                          {
+                              "price": price,
+                              "notional": notional,
+                              "distance": distance,
+                          }
+                      )
+
+                  if (
+                      distance
+                      <= MIGRATION_DISTANCE
+                  ):
+
+                      tracking_bids.append(
+                          {
+                              "price": price,
+                              "notional": notional,
+                              "distance": distance,
+                          }
+                      )
+
+              for level in asks:
+
+                  price = level_price(
+                      level
+                  )
+
+                  notional = level_notional(
+                      level
+                  )
+
+                  if (
+                      price is None
+                      or notional is None
+                  ):
+                      continue
+
+                  distance = calculate_distance(
+                      price,
+                      mid
+                  )
+
+                  if distance is None:
+                      continue
+
+                  if (
+                      distance
+                      <= PRIMARY_DISTANCE
+                  ):
+
+                      primary_asks.append(
+                          {
+                              "price": price,
+                              "notional": notional,
+                              "distance": distance,
+                          }
+                      )
+
+                  if (
+                      distance
+                      <= MIGRATION_DISTANCE
+                  ):
+
+                      tracking_asks.append(
+                          {
+                              "price": price,
+                              "notional": notional,
+                              "distance": distance,
+                          }
+                      )
+
+              # ----------------------------------------------------
+              # NEAR-BOOK TOTALS
+              # ----------------------------------------------------
+
+              bid_total = sum(
+                  item["notional"]
+                  for item in primary_bids
+              )
+
+              ask_total = sum(
+                  item["notional"]
+                  for item in primary_asks
+              )
+
+              total = (
+                  bid_total
+                  + ask_total
+              )
+
+              if total <= 0:
+
+                  imbalance = None
+
+              else:
+
+                  imbalance = (
+                      bid_total
+                      - ask_total
+                  ) / total
+
+              # ----------------------------------------------------
+              # MATERIALITY
+              # ----------------------------------------------------
+
+              def enrich(
+                  walls
+              ):
+
+                  result = []
+
+                  for wall in walls:
+
+                      materiality = (
+                          wall["notional"]
+                          / total
+                          if total > 0
+                          else None
+                      )
+
+                      if (
+                          materiality is not None
+                          and materiality
+                          >= DOMINANT_MATERIALITY
+                      ):
+
+                          wall_class = (
+                              "DOMINANT"
+                          )
+
+                      elif (
+                          materiality is not None
+                          and materiality
+                          >= MATERIALITY_THRESHOLD
+                      ):
+
+                          wall_class = (
+                              "MATERIAL"
+                          )
+
+                      else:
+
+                          wall_class = (
+                              "ORDINARY"
+                          )
+
+                      result.append(
+                          {
+                              **wall,
+                              "materiality":
+                                  materiality,
+                              "class":
+                                  wall_class,
+                          }
+                      )
+
+                  return result
+
+              primary_bids = enrich(
+                  primary_bids
+              )
+
+              primary_asks = enrich(
+                  primary_asks
+              )
+
+              # ----------------------------------------------------
+              # STRONGEST MATERIAL WALL
+              # ----------------------------------------------------
+
+              material_bids = [
+                  item
+                  for item in primary_bids
+                  if (
+                      item["materiality"]
+                      is not None
+                      and item["materiality"]
+                      >= MATERIALITY_THRESHOLD
+                  )
+              ]
+
+              material_asks = [
+                  item
+                  for item in primary_asks
+                  if (
+                      item["materiality"]
+                      is not None
+                      and item["materiality"]
+                      >= MATERIALITY_THRESHOLD
+                  )
+              ]
+
+              strongest_bid = (
+                  max(
+                      material_bids,
+                      key=lambda x:
+                          x["materiality"]
+                  )
+                  if material_bids
+                  else None
+              )
+
+              strongest_ask = (
+                  max(
+                      material_asks,
+                      key=lambda x:
+                          x["materiality"]
+                  )
+                  if material_asks
+                  else None
+              )
+
+              return {
+                  "mid": mid,
+                  "imbalance": imbalance,
+                  "bid_total": bid_total,
+                  "ask_total": ask_total,
+                  "primary_bids":
+                      primary_bids,
+                  "primary_asks":
+                      primary_asks,
+                  "tracking_bids":
+                      tracking_bids,
+                  "tracking_asks":
+                      tracking_asks,
+                  "strongest_bid":
+                      strongest_bid,
+                  "strongest_ask":
+                      strongest_ask,
+              }
+
+
+          # ========================================================
+          # LOAD CURRENT SNAPSHOT
+          # ========================================================
+
+          latest = load_json(
+              latest_path
+          )
+
+          if not latest:
+
+              raise SystemExit(
+                  "P5 V2: data/latest.json okunamadı."
+              )
+
+          if latest.get("ok") is not True:
+
+              raise SystemExit(
+                  "P5 V2: Paribu snapshot geçerli değil."
+              )
+
+          fetched_at = latest.get(
+              "fetched_at"
+          )
+
+          if not fetched_at:
+
+              raise SystemExit(
+                  "P5 V2: fetched_at bulunamadı."
+              )
+
+          try:
+
+              fetched_dt = datetime.fromisoformat(
+                  fetched_at.replace(
+                      "Z",
+                      "+00:00"
+                  )
+              )
+
+          except ValueError:
+
+              raise SystemExit(
+                  "P5 V2: fetched_at formatı geçersiz."
+              )
+
+          now = datetime.now(
+              timezone.utc
+          )
+
+          age_seconds = (
+              now - fetched_dt
+          ).total_seconds()
+
+          # --------------------------------------------------------
+          # DATA HEALTH
+          # --------------------------------------------------------
+
+          if age_seconds < -300:
+
+              raise SystemExit(
+                  "P5 V2: gelecek zamanlı snapshot."
+              )
+
+          if age_seconds > 45 * 60:
+
+              raise SystemExit(
+                  "P5 V2: snapshot stale."
+              )
+
+          # ========================================================
+          # LOAD ORDERBOOK HISTORY
+          # ========================================================
+
+          snapshots = []
+
+          if orderbook_dir.exists():
+
+              for path in sorted(
+                  orderbook_dir.glob(
+                      "*.jsonl"
+                  )
+              ):
+
+                  for line in path.read_text(
+                      encoding="utf-8"
+                  ).splitlines():
+
+                      if not line.strip():
+                          continue
+
+                      try:
+
+                          row = json.loads(
+                              line
+                          )
+
+                          if isinstance(
+                              row,
+                              dict
+                          ):
+
+                              snapshots.append(
+                                  row
+                              )
+
+                      except json.JSONDecodeError:
+
+                          continue
+
+          # --------------------------------------------------------
+          # SORT
+          # --------------------------------------------------------
+
+          snapshots.sort(
+              key=lambda row:
+                  row.get(
+                      "fetched_at",
+                      ""
+                  )
+          )
+
+          # --------------------------------------------------------
+          # DEDUPLICATE BY fetched_at
+          # --------------------------------------------------------
+
+          deduplicated = []
+
+          seen = set()
+
+          for snapshot in snapshots:
+
+              timestamp = snapshot.get(
+                  "fetched_at"
+              )
+
+              if not timestamp:
+                  continue
+
+              if timestamp in seen:
+                  continue
+
+              seen.add(timestamp)
+
+              deduplicated.append(
+                  snapshot
+              )
+
+          snapshots = deduplicated
+
+          # --------------------------------------------------------
+          # EXCLUDE CURRENT SNAPSHOT
+          # --------------------------------------------------------
+
+          historical_snapshots = [
+              snapshot
+              for snapshot in snapshots
+              if snapshot.get(
+                  "fetched_at"
+              ) != fetched_at
+          ]
+
+          # ========================================================
+          # PERSISTENCE / WALL MATCHING
+          # ========================================================
+
+          def wall_matches(
+              previous_wall,
+              current_wall,
+              current_mid
+          ):
+
+              if (
+                  previous_wall is None
+                  or current_wall is None
+              ):
+                  return False
+
+              old_price = previous_wall.get(
+                  "price"
+              )
+
+              new_price = current_wall.get(
+                  "price"
+              )
+
+              if (
+                  old_price is None
+                  or new_price is None
+              ):
+                  return False
+
+              # A wall is considered the same
+              # tracked wall when its new price
+              # remains within the migration
+              # tracking displacement band.
+
+              movement = displacement(
+                  old_price,
+                  new_price
+              )
+
+              if movement is None:
+                  return False
+
+              return (
+                  movement
+                  <= MIGRATION_DISTANCE
+              )
+
+
+          def calculate_persistence(
+              historical_metrics,
+              side
+          ):
+
+              if not historical_metrics:
+                  return 0
+
+              count = 0
+
+              previous_wall = None
+
+              for metrics in reversed(
+                  historical_metrics
+              ):
+
+                  wall = metrics.get(
+                      f"strongest_{side}"
+                  )
+
+                  if wall is None:
+                      break
+
+                  if (
+                      wall.get(
+                          "materiality"
+                      ) is None
+                  ):
+                      break
+
+                  if (
+                      wall["materiality"]
+                      < MATERIALITY_THRESHOLD
+                  ):
+                      break
+
+                  if (
+                      previous_wall is not None
+                  ):
+
+                      if not wall_matches(
+                          wall,
+                          previous_wall,
+                          metrics.get(
+                              "mid"
+                          )
+                      ):
+
+                          break
+
+                  previous_wall = wall
+
+                  count += 1
+
+                  if count >= 20:
+                      break
+
+              return count
+
+
+          # ========================================================
+          # BUILD P5 OUTPUT
+          # ========================================================
+
+          output = {
+
+              "model": "P5",
+
+              "version": "V2",
+
+              "status": "FROZEN",
+
+              "generated_at":
+                  datetime.now(
+                      timezone.utc
+                  ).isoformat(),
+
+              "snapshot_at":
+                  fetched_at,
+
+              "data_health": {
+
+                  "snapshot_age_seconds":
+                      round(
+                          age_seconds,
+                          2
+                      ),
+
+                  "orderbook_history_rows":
+                      len(snapshots),
+
+                  "historical_rows_used":
+                      len(
+                          historical_snapshots
+                      ),
+
+                  "healthy":
+                      True,
+              },
+
+              "spec": {
+
+                  "imbalance_threshold":
+                      IMBALANCE_THRESHOLD,
+
+                  "materiality_threshold":
+                      MATERIALITY_THRESHOLD,
+
+                  "dominant_materiality":
+                      DOMINANT_MATERIALITY,
+
+                  "primary_distance":
+                      PRIMARY_DISTANCE,
+
+                  "migration_distance":
+                      MIGRATION_DISTANCE,
+
+                  "migration_displacement":
+                      MIGRATION_DISPLACEMENT,
+
+                  "persistence_candidate":
+                      PERSISTENCE_CANDIDATE,
+
+                  "persistence_confirmed":
+                      PERSISTENCE_CONFIRMED,
+
+                  "prediction_horizon_snapshots":
+                      PREDICTION_HORIZON,
+
+                  "snapshot_interval_minutes":
+                      SNAPSHOT_INTERVAL_MINUTES,
+
+                  "prediction_horizon_minutes":
+                      (
+                          PREDICTION_HORIZON
+                          * SNAPSHOT_INTERVAL_MINUTES
+                      ),
+              },
+
+              "coins": {},
+          }
+
+          # ========================================================
+          # COIN ANALYSIS
+          # ========================================================
+
+          for coin, market in COINS.items():
+
+              current_market = (
+                  latest.get(
+                      "markets",
+                      {}
+                  ).get(
+                      market
+                  )
+              )
+
+              if not current_market:
+
+                  output["coins"][coin] = {
+
+                      "state":
+                          "INSUFFICIENT_DATA",
+
+                      "actionable_transition":
+                          False,
+                  }
+
+                  continue
+
+              current_metrics = (
+                  calculate_metrics(
+                      {
+                          "last":
+                              (
+                                  current_market
+                                  .get(
+                                      "ticker",
+                                      [{}]
+                                  )[0]
+                                  .get(
+                                      "last"
+                                  )
+                              ),
+
+                          "bids":
+                              current_market
+                              .get(
+                                  "orderbook",
+                                  {}
+                              )
+                              .get(
+                                  "bids",
+                                  []
+                              ),
+
+                          "asks":
+                              current_market
+                              .get(
+                                  "orderbook",
+                                  {}
+                              )
+                              .get(
+                                  "asks",
+                                  []
+                              ),
+                      }
+                  )
+              )
+
+              if current_metrics is None:
+
+                  output["coins"][coin] = {
+
+                      "state":
+                          "INSUFFICIENT_DATA",
+
+                      "actionable_transition":
+                          False,
+                  }
+
+                  continue
+
+              # ----------------------------------------------------
+              # HISTORICAL METRICS
+              # ----------------------------------------------------
+
+              historical_metrics = []
+
+              for snapshot in (
+                  historical_snapshots
+              ):
+
+                  market_data = (
+                      snapshot
+                      .get(
+                          "markets",
+                          {}
+                      )
+                      .get(
+                          market
+                      )
+                  )
+
+                  if not market_data:
+                      continue
+
+                  metrics = calculate_metrics(
+                      market_data
+                  )
+
+                  if metrics is not None:
+
+                      historical_metrics.append(
+                          {
+                              "fetched_at":
+                                  snapshot.get(
+                                      "fetched_at"
+                                  ),
+                              "metrics":
+                                  metrics,
+                          }
+                      )
+
+              metrics_only = [
+                  item["metrics"]
+                  for item
+                  in historical_metrics
+              ]
+
+              # ----------------------------------------------------
+              # PREVIOUS
+              # ----------------------------------------------------
+
+              previous_metrics = (
+                  metrics_only[-1]
+                  if metrics_only
+                  else None
+              )
+
+              # ----------------------------------------------------
+              # IMBALANCE
+              # ----------------------------------------------------
+
+              imbalance = (
+                  current_metrics[
+                      "imbalance"
+                  ]
+              )
+
+              if imbalance is None:
+
+                  imbalance_state = (
+                      "NEUTRAL"
+                  )
+
+              elif (
+                  imbalance
+                  > IMBALANCE_THRESHOLD
+              ):
+
+                  imbalance_state = (
+                      "DEMAND"
+                  )
+
+              elif (
+                  imbalance
+                  < -IMBALANCE_THRESHOLD
+              ):
+
+                  imbalance_state = (
+                      "SUPPLY"
+                  )
+
+              else:
+
+                  imbalance_state = (
+                      "NEUTRAL"
+                  )
+
+              # ----------------------------------------------------
+              # WALLS
+              # ----------------------------------------------------
+
+              bid_wall = (
+                  current_metrics[
+                      "strongest_bid"
+                  ]
+              )
+
+              ask_wall = (
+                  current_metrics[
+                      "strongest_ask"
+                  ]
+              )
+
+              bid_distance = (
+                  bid_wall["distance"]
+                  if bid_wall
+                  else None
+              )
+
+              ask_distance = (
+                  ask_wall["distance"]
+                  if ask_wall
+                  else None
+              )
+
+              bid_materiality = (
+                  bid_wall["materiality"]
+                  if bid_wall
+                  else None
+              )
+
+              ask_materiality = (
+                  ask_wall["materiality"]
+                  if ask_wall
+                  else None
+              )
+
+              # ----------------------------------------------------
+              # PERSISTENCE
+              # ----------------------------------------------------
+
+              bid_persistence = (
+                  calculate_persistence(
+                      metrics_only,
+                      "bid"
+                  )
+              )
+
+              ask_persistence = (
+                  calculate_persistence(
+                      metrics_only,
+                      "ask"
+                  )
+              )
+
+              # ----------------------------------------------------
+              # PREVIOUS WALLS
+              # ----------------------------------------------------
+
+              previous_bid = (
+                  previous_metrics[
+                      "strongest_bid"
+                  ]
+                  if previous_metrics
+                  else None
+              )
+
+              previous_ask = (
+                  previous_metrics[
+                      "strongest_ask"
+                  ]
+                  if previous_metrics
+                  else None
+              )
+
+              # ----------------------------------------------------
+              # CURRENT WALL MOVEMENT
+              # ----------------------------------------------------
+
+              bid_displacement = (
+                  displacement(
+                      previous_bid[
+                          "price"
+                      ]
+                      if previous_bid
+                      else None,
+
+                      bid_wall[
+                          "price"
+                      ]
+                      if bid_wall
+                      else None,
+                  )
+              )
+
+              ask_displacement = (
+                  displacement(
+                      previous_ask[
+                          "price"
+                      ]
+                      if previous_ask
+                      else None,
+
+                      ask_wall[
+                          "price"
+                      ]
+                      if ask_wall
+                      else None,
+                  )
+              )
+
+              # ----------------------------------------------------
+              # MIGRATION
+              # ----------------------------------------------------
+
+              bid_migration = (
+
+                  bid_wall is not None
+
+                  and previous_bid is not None
+
+                  and bid_materiality is not None
+
+                  and bid_materiality
+                      >= MATERIALITY_THRESHOLD
+
+                  and bid_distance is not None
+
+                  and bid_distance
+                      <= MIGRATION_DISTANCE
+
+                  and bid_displacement is not None
+
+                  and bid_displacement
+                      >= MIGRATION_DISPLACEMENT
+              )
+
+              ask_migration = (
+
+                  ask_wall is not None
+
+                  and previous_ask is not None
+
+                  and ask_materiality is not None
+
+                  and ask_materiality
+                      >= MATERIALITY_THRESHOLD
+
+                  and ask_distance is not None
+
+                  and ask_distance
+                      <= MIGRATION_DISTANCE
+
+                  and ask_displacement is not None
+
+                  and ask_displacement
+                      >= MIGRATION_DISPLACEMENT
+              )
+
+              # ----------------------------------------------------
+              # RESOLUTION
+              # ----------------------------------------------------
+
+              bid_resolution = (
+
+                  previous_bid is not None
+
+                  and bid_wall is None
+              )
+
+              ask_resolution = (
+
+                  previous_ask is not None
+
+                  and ask_wall is None
+              )
+
+              # ----------------------------------------------------
+              # CONFIRMED PERSISTENCE
+              # ----------------------------------------------------
+
+              bid_confirmed = (
+                  bid_persistence
+                  >= PERSISTENCE_CONFIRMED
+              )
+
+              ask_confirmed = (
+                  ask_persistence
+                  >= PERSISTENCE_CONFIRMED
+              )
+
+              # ----------------------------------------------------
+              # STRUCTURE
+              # ----------------------------------------------------
+
+              bullish_structure = (
+
+                  imbalance_state
+                  == "DEMAND"
+
+                  and bid_wall is not None
+
+                  and bid_distance is not None
+
+                  and bid_distance
+                      <= PRIMARY_DISTANCE
+
+                  and bid_confirmed
+              )
+
+              bearish_structure = (
+
+                  imbalance_state
+                  == "SUPPLY"
+
+                  and ask_wall is not None
+
+                  and ask_distance is not None
+
+                  and ask_distance
+                      <= PRIMARY_DISTANCE
+
+                  and ask_confirmed
+              )
+
+              # ----------------------------------------------------
+              # EXPANSION
+              # ----------------------------------------------------
+
+              bullish_expansion = (
+
+                  bullish_structure
+
+                  and (
+
+                      ask_resolution
+
+                      or ask_migration
+                  )
+              )
+
+              bearish_expansion = (
+
+                  bearish_structure
+
+                  and (
+
+                      bid_resolution
+
+                      or bid_migration
+                  )
+              )
+
+              # ----------------------------------------------------
+              # WEAKENING
+              # ----------------------------------------------------
+
+              bullish_weakening = (
+
+                  previous_metrics is not None
+
+                  and (
+                      previous_metrics.get(
+                          "imbalance"
+                      ) or 0
+                  )
+                  > IMBALANCE_THRESHOLD
+
+                  and (
+                      imbalance is None
+                      or imbalance
+                      <= IMBALANCE_THRESHOLD
+                  )
+              )
+
+              bearish_weakening = (
+
+                  previous_metrics is not None
+
+                  and (
+                      previous_metrics.get(
+                          "imbalance"
+                      ) or 0
+                  )
+                  < -IMBALANCE_THRESHOLD
+
+                  and (
+                      imbalance is None
+                      or imbalance
+                      >= -IMBALANCE_THRESHOLD
+                  )
+              )
+
+              # ----------------------------------------------------
+              # STATE
+              # ----------------------------------------------------
+
+              if bullish_expansion:
+
+                  state = (
+                      "BULLISH_EXPANSION"
+                  )
+
+              elif bearish_expansion:
+
+                  state = (
+                      "BEARISH_EXPANSION"
+                  )
+
+              elif bullish_structure:
+
+                  state = (
+                      "BULLISH_STRUCTURE"
+                  )
+
+              elif bearish_structure:
+
+                  state = (
+                      "BEARISH_STRUCTURE"
+                  )
+
+              elif bullish_weakening:
+
+                  state = (
+                      "WEAKENING"
+                  )
+
+              elif bearish_weakening:
+
+                  state = (
+                      "WEAKENING"
+                  )
+
+              elif (
+                  imbalance_state
+                  == "DEMAND"
+              ):
+
+                  state = (
+                      "DEMAND_BIAS"
+                  )
+
+              elif (
+                  imbalance_state
+                  == "SUPPLY"
+              ):
+
+                  state = (
+                      "SUPPLY_BIAS"
+                  )
+
+              elif (
+                  bid_migration
+                  or ask_migration
+                  or bid_resolution
+                  or ask_resolution
+              ):
+
+                  state = (
+                      "TRANSITION_WATCH"
+                  )
+
+              else:
+
+                  state = (
+                      "NEUTRAL"
+                  )
+
+              # ----------------------------------------------------
+              # ACTIONABLE TRANSITION
+              # ----------------------------------------------------
+
+              actionable_transition = (
+
+                  state
+                  in {
+                      "BULLISH_EXPANSION",
+                      "BEARISH_EXPANSION",
+                  }
+              )
+
+              # ----------------------------------------------------
+              # OUTPUT
+              # ----------------------------------------------------
+
+              output["coins"][coin] = {
+
+                  "state":
+                      state,
+
+                  "actionable_transition":
+                      actionable_transition,
+
+                  "imbalance": {
+
+                      "value":
+                          imbalance,
+
+                      "state":
+                          imbalance_state,
+
+                      "threshold":
+                          IMBALANCE_THRESHOLD,
+                  },
+
+                  "bid_wall": {
+
+                      "price":
+                          (
+                              bid_wall[
+                                  "price"
+                              ]
+                              if bid_wall
+                              else None
+                          ),
+
+                      "materiality":
+                          bid_materiality,
+
+                      "class":
+                          (
+                              bid_wall[
+                                  "class"
+                              ]
+                              if bid_wall
+                              else None
+                          ),
+
+                      "distance":
+                          bid_distance,
+
+                      "persistence":
+                          bid_persistence,
+
+                      "persistence_status":
+                          (
+                              "CONFIRMED"
+                              if bid_confirmed
+                              else
+                              "CANDIDATE"
+                              if bid_persistence
+                              >= PERSISTENCE_CANDIDATE
+                              else
+                              "OBSERVATION"
+                          ),
+
+                      "migration":
+                          bid_migration,
+
+                      "displacement":
+                          bid_displacement,
+
+                      "resolution":
+                          bid_resolution,
+                  },
+
+                  "ask_wall": {
+
+                      "price":
+                          (
+                              ask_wall[
+                                  "price"
+                              ]
+                              if ask_wall
+                              else None
+                          ),
+
+                      "materiality":
+                          ask_materiality,
+
+                      "class":
+                          (
+                              ask_wall[
+                                  "class"
+                              ]
+                              if ask_wall
+                              else None
+                          ),
+
+                      "distance":
+                          ask_distance,
+
+                      "persistence":
+                          ask_persistence,
+
+                      "persistence_status":
+                          (
+                              "CONFIRMED"
+                              if ask_confirmed
+                              else
+                              "CANDIDATE"
+                              if ask_persistence
+                              >= PERSISTENCE_CANDIDATE
+                              else
+                              "OBSERVATION"
+                          ),
+
+                      "migration":
+                          ask_migration,
+
+                      "displacement":
+                          ask_displacement,
+
+                      "resolution":
+                          ask_resolution,
+                  },
+
+                  "prediction_horizon": {
+
+                      "snapshots":
+                          PREDICTION_HORIZON,
+
+                      "minutes":
+                          (
+                              PREDICTION_HORIZON
+                              * SNAPSHOT_INTERVAL_MINUTES
+                          ),
+                  },
+
+                  "evidence": {
+
+                      "bid_migration":
+                          bid_migration,
+
+                      "ask_migration":
+                          ask_migration,
+
+                      "bid_resolution":
+                          bid_resolution,
+
+                      "ask_resolution":
+                          ask_resolution,
+
+                      "bid_persistence_confirmed":
+                          bid_confirmed,
+
+                      "ask_persistence_confirmed":
+                          ask_confirmed,
+                  },
+
+                  "data": {
+
+                      "historical_snapshots":
+                          len(
+                              historical_metrics
+                          ),
+                  },
+              }
+
+          # ========================================================
+          # WRITE P5 STATE ONLY
+          # ========================================================
+
+          output_path.parent.mkdir(
+              parents=True,
+              exist_ok=True
+          )
+
+          output_path.write_text(
+              json.dumps(
+                  output,
+                  indent=2,
+                  ensure_ascii=False
+              ) + "\n",
+              encoding="utf-8"
+          )
+
+          print(
+              "P5 V2 completed successfully."
+          )
+
+          print(
+              json.dumps(
+                  output,
+                  indent=2,
+                  ensure_ascii=False
+              )
+          )
+
+      # ============================================================
+      # COMMIT ONLY P5 STATE
+      # ============================================================
+
+      - name: Commit P5 V2 state
+        shell: bash
+        run: |
+
+          set -euo pipefail
+
+          git config user.name \
+            "github-actions[bot]"
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add state/p5_v2.json
+
+          if git diff --cached --quiet; then
+
+            echo "No P5 V2 state changes."
+
+            exit 0
+
+          fi
+
+          git commit \
+            -m "Add P5 V2 evidence state"
+
+          git fetch origin main
+
+          git rebase origin/main
+
+          git push origin HEAD:main
