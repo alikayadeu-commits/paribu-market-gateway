@@ -1,0 +1,786 @@
+name: Historical Orderbook Impact
+
+on:
+  workflow_run:
+    workflows:
+      - "Paribu Market Data"
+    types:
+      - completed
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: historical-orderbook-impact
+  cancel-in-progress: false
+
+jobs:
+  impact:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Calculate historical orderbook impact
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+          from datetime import datetime, timezone
+
+          COINS = {
+              "VIRTUAL": "virtual_tl",
+              "FET": "fet_tl",
+              "KITE": "kite_tl",
+              "ATH": "ath_tl",
+          }
+
+          BANDS = [
+              (0.000, 0.005),
+              (0.005, 0.010),
+              (0.010, 0.020),
+              (0.020, 0.050),
+          ]
+
+          def num(value):
+              try:
+                  return float(value)
+              except Exception:
+                  return 0.0
+
+          def parse_time(value):
+              if not value:
+                  return None
+
+              try:
+                  return datetime.fromisoformat(
+                      str(value).replace("Z", "+00:00")
+                  ).astimezone(timezone.utc)
+              except Exception:
+                  return None
+
+          def load_jsonl(path):
+              rows = []
+
+              if not path.exists():
+                  return rows
+
+              with path.open("r", encoding="utf-8") as file:
+                  for line in file:
+                      line = line.strip()
+
+                      if not line:
+                          continue
+
+                      try:
+                          rows.append(json.loads(line))
+                      except Exception:
+                          continue
+
+              return rows
+
+          def normalize_levels(levels):
+              result = []
+
+              for level in levels or []:
+                  if isinstance(level, (list, tuple)) and len(level) >= 2:
+                      price = num(level[0])
+                      quantity = num(level[1])
+
+                  elif isinstance(level, dict):
+                      price = num(
+                          level.get(
+                              "price",
+                              level.get("rate", 0)
+                          )
+                      )
+
+                      quantity = num(
+                          level.get(
+                              "quantity",
+                              level.get(
+                                  "amount",
+                                  level.get("qty", 0)
+                              )
+                          )
+                      )
+                  else:
+                      continue
+
+                  if price > 0 and quantity > 0:
+                      result.append(
+                          (price, quantity)
+                      )
+
+              return result
+
+          def get_band(distance):
+              for low, high in BANDS:
+                  if low <= distance < high:
+                      return f"{low * 100:.1f}-{high * 100:.1f}%"
+
+              return None
+
+          def extract_market(snapshot, market):
+              markets = snapshot.get("markets", {})
+
+              data = markets.get(market, {})
+
+              if not data:
+                  return None
+
+              price = num(data.get("last"))
+
+              if price <= 0:
+                  ticker = data.get("ticker")
+
+                  if isinstance(ticker, list) and ticker:
+                      price = num(
+                          ticker[0].get("last")
+                      )
+
+              if price <= 0:
+                  return None
+
+              orderbook = data.get(
+                  "orderbook",
+                  data
+              )
+
+              bids = normalize_levels(
+                  orderbook.get("bids", [])
+              )
+
+              asks = normalize_levels(
+                  orderbook.get("asks", [])
+              )
+
+              return {
+                  "price": price,
+                  "bids": bids,
+                  "asks": asks,
+              }
+
+          # ---------------------------------------------------------
+          # LOAD COMPLETE ORDERBOOK HISTORY
+          # ---------------------------------------------------------
+
+          history_files = sorted(
+              Path("orderbook_history").glob("*.jsonl")
+          )
+
+          snapshots = []
+
+          for path in history_files:
+              for row in load_jsonl(path):
+                  timestamp = parse_time(
+                      row.get("fetched_at")
+                  )
+
+                  if timestamp:
+                      row["_time"] = timestamp
+                      snapshots.append(row)
+
+          snapshots.sort(
+              key=lambda row: row["_time"]
+          )
+
+          if not snapshots:
+              raise SystemExit(
+                  "No orderbook history found."
+              )
+
+          print(
+              f"Loaded {len(snapshots)} orderbook snapshots."
+          )
+
+          # ---------------------------------------------------------
+          # BUILD HISTORICAL MARKET SERIES
+          # ---------------------------------------------------------
+
+          market_history = {
+              coin: []
+              for coin in COINS
+          }
+
+          for snapshot in snapshots:
+              for coin, market in COINS.items():
+
+                  data = extract_market(
+                      snapshot,
+                      market
+                  )
+
+                  if data is None:
+                      continue
+
+                  market_history[coin].append({
+                      "time": snapshot["_time"],
+                      "price": data["price"],
+                      "bids": data["bids"],
+                      "asks": data["asks"],
+                  })
+
+          # ---------------------------------------------------------
+          # BUILD HISTORICAL ORDER OBSERVATIONS
+          # ---------------------------------------------------------
+
+          observations = {
+              coin: []
+              for coin in COINS
+          }
+
+          for coin in COINS:
+
+              rows = market_history[coin]
+
+              if len(rows) < 3:
+                  continue
+
+              for index in range(
+                  len(rows) - 1
+              ):
+
+                  current = rows[index]
+                  following = rows[index + 1]
+
+                  current_price = current["price"]
+
+                  for side, levels in (
+                      ("buy", current["bids"]),
+                      ("sell", current["asks"]),
+                  ):
+
+                      for price, quantity in levels:
+
+                          if side == "buy":
+                              distance = (
+                                  current_price - price
+                              ) / current_price
+                          else:
+                              distance = (
+                                  price - current_price
+                              ) / current_price
+
+                          price_band = get_band(
+                              distance
+                          )
+
+                          if price_band is None:
+                              continue
+
+                          # Find a comparable order in the next
+                          # snapshot. This gives us a basic
+                          # persistence / migration signal.
+
+                          next_levels = (
+                              following["bids"]
+                              if side == "buy"
+                              else following["asks"]
+                          )
+
+                          comparable = None
+
+                          for next_price, next_quantity in next_levels:
+
+                              if (
+                                  abs(
+                                      next_price - price
+                                  )
+                                  / current_price
+                                  <= 0.0025
+                              ):
+                                  comparable = (
+                                      next_price,
+                                      next_quantity
+                                  )
+                                  break
+
+                          if comparable is None:
+                              persistence = "resolved"
+                              migration = "none"
+                          else:
+                              next_price, next_quantity = comparable
+
+                              persistence = "persisted"
+
+                              if next_price > price:
+                                  migration = "up"
+                              elif next_price < price:
+                                  migration = "down"
+                              else:
+                                  migration = "none"
+
+                          # -------------------------------------------------
+                          # FUTURE PRICE RESPONSE
+                          # -------------------------------------------------
+
+                          responses = []
+
+                          for horizon in (1, 3, 6):
+
+                              future_index = (
+                                  index + horizon
+                              )
+
+                              if future_index >= len(rows):
+                                  continue
+
+                              future_price = rows[
+                                  future_index
+                              ]["price"]
+
+                              move = (
+                                  future_price
+                                  - current_price
+                              ) / current_price
+
+                              if move > 0.005:
+                                  direction = "UP"
+                              elif move < -0.005:
+                                  direction = "DOWN"
+                              else:
+                                  direction = "NEUTRAL"
+
+                              responses.append({
+                                  "horizon": horizon,
+                                  "move": move,
+                                  "direction": direction,
+                              })
+
+                          if not responses:
+                              continue
+
+                          # Shortest available response is used
+                          # for the primary historical comparison.
+
+                          response = responses[0]
+
+                          observations[coin].append({
+                              "side": side,
+                              "band": price_band,
+                              "price": price,
+                              "quantity": quantity,
+                              "persistence": persistence,
+                              "migration": migration,
+                              "resolution": (
+                                  "resolved"
+                                  if persistence == "resolved"
+                                  else "remaining"
+                              ),
+                              "response": response,
+                          })
+
+          # ---------------------------------------------------------
+          # LOAD CURRENT SNAPSHOT
+          # ---------------------------------------------------------
+
+          latest_path = Path(
+              "data/latest.json"
+          )
+
+          if not latest_path.exists():
+              raise SystemExit(
+                  "data/latest.json not found."
+              )
+
+          with latest_path.open(
+              "r",
+              encoding="utf-8"
+          ) as file:
+              latest = json.load(file)
+
+          output = {
+              "generated_at": datetime.now(
+                  timezone.utc
+              ).isoformat(),
+
+              "method": (
+                  "historical_orderbook_impact"
+              ),
+
+              "historical_snapshot_count": len(
+                  snapshots
+              ),
+
+              "markets": {},
+          }
+
+          # ---------------------------------------------------------
+          # CURRENT MARKET ANALYSIS
+          # ---------------------------------------------------------
+
+          for coin, market in COINS.items():
+
+              current = extract_market(
+                  latest,
+                  market
+              )
+
+              if current is None:
+                  output["markets"][coin] = {
+                      "confidence": "INSUFFICIENT_DATA",
+                      "historical_sample_count": 0,
+                  }
+
+                  continue
+
+              current_price = current["price"]
+
+              current_orders = []
+
+              for side, levels in (
+                  ("buy", current["bids"]),
+                  ("sell", current["asks"]),
+              ):
+
+                  for price, quantity in levels:
+
+                      if side == "buy":
+                          distance = (
+                              current_price - price
+                          ) / current_price
+                      else:
+                          distance = (
+                              price - current_price
+                          ) / current_price
+
+                      price_band = get_band(
+                          distance
+                      )
+
+                      if price_band is None:
+                          continue
+
+                      current_orders.append({
+                          "side": side,
+                          "price": price,
+                          "quantity": quantity,
+                          "band": price_band,
+                      })
+
+              buy_evidence = []
+              sell_evidence = []
+
+              for order in current_orders:
+
+                  candidates = []
+
+                  for historical in observations[coin]:
+
+                      if (
+                          historical["side"]
+                          != order["side"]
+                      ):
+                          continue
+
+                      if (
+                          historical["band"]
+                          != order["band"]
+                      ):
+                          continue
+
+                      # Relative order size similarity.
+                      size_ratio = (
+                          min(
+                              order["quantity"],
+                              historical["quantity"]
+                          )
+                          /
+                          max(
+                              order["quantity"],
+                              historical["quantity"]
+                          )
+                      )
+
+                      score = size_ratio
+
+                      if (
+                          historical["persistence"]
+                          == "persisted"
+                      ):
+                          score += 0.10
+
+                      candidates.append(
+                          (
+                              score,
+                              historical
+                          )
+                      )
+
+                  candidates.sort(
+                      key=lambda item: item[0],
+                      reverse=True
+                  )
+
+                  candidates = candidates[:25]
+
+                  up = 0
+                  down = 0
+                  neutral = 0
+
+                  for _, historical in candidates:
+
+                      direction = historical[
+                          "response"
+                      ]["direction"]
+
+                      if direction == "UP":
+                          up += 1
+
+                      elif direction == "DOWN":
+                          down += 1
+
+                      else:
+                          neutral += 1
+
+                  sample_count = (
+                      up + down + neutral
+                  )
+
+                  if sample_count == 0:
+
+                      direction = (
+                          "INSUFFICIENT_DATA"
+                      )
+
+                      confidence = (
+                          "INSUFFICIENT_DATA"
+                      )
+
+                  else:
+
+                      counts = {
+                          "UP": up,
+                          "DOWN": down,
+                          "NEUTRAL": neutral,
+                      }
+
+                      direction = max(
+                          counts,
+                          key=counts.get
+                      )
+
+                      consistency = (
+                          counts[direction]
+                          / sample_count
+                      )
+
+                      if (
+                          sample_count >= 8
+                          and consistency >= 0.65
+                      ):
+                          confidence = "STRONG"
+
+                      elif (
+                          sample_count >= 4
+                          and consistency >= 0.55
+                      ):
+                          confidence = "MEDIUM"
+
+                      else:
+                          confidence = "LOW"
+
+                  evidence = {
+                      "side": order["side"],
+                      "price": order["price"],
+                      "quantity": order["quantity"],
+                      "band": order["band"],
+                      "historical_sample_count": sample_count,
+                      "historical_direction": direction,
+                      "confidence": confidence,
+                      "up_count": up,
+                      "down_count": down,
+                      "neutral_count": neutral,
+                  }
+
+                  if order["side"] == "buy":
+                      buy_evidence.append(
+                          evidence
+                      )
+                  else:
+                      sell_evidence.append(
+                          evidence
+                      )
+
+              def aggregate(evidence):
+
+                  if not evidence:
+                      return {
+                          "direction": (
+                              "INSUFFICIENT_DATA"
+                          ),
+                          "confidence": (
+                              "INSUFFICIENT_DATA"
+                          ),
+                          "sample_count": 0,
+                      }
+
+                  counts = {
+                      "UP": 0,
+                      "DOWN": 0,
+                      "NEUTRAL": 0,
+                  }
+
+                  samples = 0
+
+                  for item in evidence:
+
+                      direction = item[
+                          "historical_direction"
+                      ]
+
+                      count = item[
+                          "historical_sample_count"
+                      ]
+
+                      if direction in counts:
+                          counts[
+                              direction
+                          ] += count
+
+                      samples += count
+
+                  if samples == 0:
+                      return {
+                          "direction": (
+                              "INSUFFICIENT_DATA"
+                          ),
+                          "confidence": (
+                              "INSUFFICIENT_DATA"
+                          ),
+                          "sample_count": 0,
+                      }
+
+                  direction = max(
+                      counts,
+                      key=counts.get
+                  )
+
+                  ratio = (
+                      counts[direction]
+                      / samples
+                  )
+
+                  if (
+                      samples >= 15
+                      and ratio >= 0.65
+                  ):
+                      confidence = "STRONG"
+
+                  elif (
+                      samples >= 6
+                      and ratio >= 0.55
+                  ):
+                      confidence = "MEDIUM"
+
+                  else:
+                      confidence = "LOW"
+
+                  return {
+                      "direction": direction,
+                      "confidence": confidence,
+                      "sample_count": samples,
+                      "up": counts["UP"],
+                      "down": counts["DOWN"],
+                      "neutral": counts["NEUTRAL"],
+                  }
+
+              output["markets"][coin] = {
+
+                  "current_relevant_buy_levels": (
+                      len(buy_evidence)
+                  ),
+
+                  "current_relevant_sell_levels": (
+                      len(sell_evidence)
+                  ),
+
+                  "current_buy_quantity": sum(
+                      item["quantity"]
+                      for item in current_orders
+                      if item["side"] == "buy"
+                  ),
+
+                  "current_sell_quantity": sum(
+                      item["quantity"]
+                      for item in current_orders
+                      if item["side"] == "sell"
+                  ),
+
+                  "historical_buy_impact": aggregate(
+                      buy_evidence
+                  ),
+
+                  "historical_sell_impact": aggregate(
+                      sell_evidence
+                  ),
+
+                  "buy_evidence": buy_evidence,
+
+                  "sell_evidence": sell_evidence,
+
+                  "historical_sample_count": len(
+                      observations[coin]
+                  ),
+              }
+
+          # ---------------------------------------------------------
+          # WRITE RESULT
+          # ---------------------------------------------------------
+
+          Path("state").mkdir(
+              exist_ok=True
+          )
+
+          output_path = Path(
+              "state/historical_orderbook_impact.json"
+          )
+
+          with output_path.open(
+              "w",
+              encoding="utf-8"
+          ) as file:
+              json.dump(
+                  output,
+                  file,
+                  ensure_ascii=False,
+                  indent=2
+              )
+
+          print(
+              json.dumps(
+                  output,
+                  ensure_ascii=False,
+                  indent=2
+              )
+          )
+
+      - name: Commit historical impact evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add state/historical_orderbook_impact.json
+
+          if git diff --cached --quiet; then
+            echo "No historical impact changes"
+            exit 0
+          fi
+
+          git commit -m "Update historical orderbook impact evidence"
+
+          git fetch origin main
+          git rebase origin/main
+
+          git push origin HEAD:main
