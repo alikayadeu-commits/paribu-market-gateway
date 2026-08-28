@@ -3,7 +3,7 @@ name: Adaptive Decision Engine
 on:
   workflow_run:
     workflows:
-      - "P5 V2 Evidence Engine"
+      - "Historical Orderbook Impact"
     types:
       - completed
 
@@ -32,6 +32,8 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # ============================================================
       # BUILD LOCAL EVIDENCE SNAPSHOT
@@ -76,6 +78,10 @@ jobs:
 
           p5_path = Path(
               "state/p5_v2.json"
+          )
+
+          historical_impact_path = Path(
+              "state/historical_orderbook_impact.json"
           )
 
           output_path = Path(
@@ -298,14 +304,6 @@ jobs:
           )
 
 
-          # P5 must correspond to the
-          # same Paribu snapshot.
-          #
-          # If it does not, we preserve the
-          # P5 output but mark it as stale
-          # for decision support.
-
-
           p5_snapshot_matches = (
               p5_snapshot_at
               == fetched_at
@@ -316,6 +314,51 @@ jobs:
               p5_healthy
               and
               p5_snapshot_matches
+          )
+
+
+          # ========================================================
+          # LOAD HISTORICAL ORDERBOOK IMPACT
+          # ========================================================
+
+          historical_impact = {}
+
+
+          if historical_impact_path.exists():
+
+              try:
+
+                  historical_impact = json.loads(
+                      historical_impact_path.read_text(
+                          encoding="utf-8"
+                      )
+                  )
+
+              except (
+                  OSError,
+                  json.JSONDecodeError
+              ):
+
+                  historical_impact = {}
+
+
+          historical_method = (
+              historical_impact.get(
+                  "method"
+              )
+          )
+
+
+          historical_snapshot_count = (
+              historical_impact.get(
+                  "historical_snapshot_count"
+              )
+          )
+
+
+          historical_available = (
+              historical_method
+              == "historical_orderbook_impact_v2"
           )
 
 
@@ -543,6 +586,18 @@ jobs:
                       ),
               },
 
+              "historical_orderbook_impact": {
+
+                  "available":
+                      historical_available,
+
+                  "method":
+                      historical_method,
+
+                  "historical_snapshot_count":
+                      historical_snapshot_count,
+              },
+
               "coins":
                   {}
           }
@@ -603,10 +658,6 @@ jobs:
                   )
 
 
-              # ----------------------------------------------------
-              # P5 STATE
-              # ----------------------------------------------------
-
               p5_state = p5_coin.get(
                   "state"
               )
@@ -661,26 +712,78 @@ jobs:
 
 
               # ----------------------------------------------------
+              # HISTORICAL ORDERBOOK IMPACT
+              # ----------------------------------------------------
+
+              historical_coin = {}
+
+
+              if historical_available:
+
+                  historical_coin = (
+                      historical_impact.get(
+                          "markets",
+                          {}
+                      ).get(
+                          coin,
+                          {}
+                      )
+                  )
+
+
+              historical_buy_impact = (
+                  historical_coin.get(
+                      "historical_buy_impact",
+                      {}
+                  )
+              )
+
+
+              historical_sell_impact = (
+                  historical_coin.get(
+                      "historical_sell_impact",
+                      {}
+                  )
+              )
+
+
+              historical_buy_evidence = (
+                  historical_coin.get(
+                      "buy_evidence",
+                      []
+                  )
+              )
+
+
+              historical_sell_evidence = (
+                  historical_coin.get(
+                      "sell_evidence",
+                      []
+                  )
+              )
+
+
+              # ----------------------------------------------------
               # DECISION
               # ----------------------------------------------------
 
-              # IMPORTANT:
-              #
               # GitHub remains an evidence layer.
               #
-              # P5 V2 does NOT directly create
-              # BUY / SELL decisions here.
+              # Historical Orderbook Impact does NOT directly
+              # create BUY / SELL decisions.
               #
-              # Final decision remains outside
-              # this workflow and requires:
+              # P5 V2 does NOT directly create BUY / SELL
+              # decisions.
+              #
+              # Final decision remains external and requires
+              # combined analysis of:
               #
               # Paribu
-              # + P5 V2
               # + Event/Lifecycle
+              # + P5 V2
+              # + Historical Orderbook Impact
               # + Binance
               # + OKX
-              #
-              # Therefore decision remains DEFERRED.
 
 
               output["coins"][coin] = {
@@ -793,6 +896,59 @@ jobs:
 
 
                   # ------------------------------------------------
+                  # HISTORICAL ORDERBOOK IMPACT
+                  # ------------------------------------------------
+
+                  "historical_orderbook_impact": {
+
+                      "available":
+                          historical_available,
+
+                      "historical_buy_impact":
+                          historical_buy_impact,
+
+                      "historical_sell_impact":
+                          historical_sell_impact,
+
+                      "historical_sample_count":
+                          historical_coin.get(
+                              "historical_sample_count"
+                          ),
+
+                      "lifecycle_count":
+                          historical_coin.get(
+                              "lifecycle_count"
+                          ),
+
+                      "current_relevant_buy_levels":
+                          historical_coin.get(
+                              "current_relevant_buy_levels"
+                          ),
+
+                      "current_relevant_sell_levels":
+                          historical_coin.get(
+                              "current_relevant_sell_levels"
+                          ),
+
+                      "current_buy_quantity":
+                          historical_coin.get(
+                              "current_buy_quantity"
+                          ),
+
+                      "current_sell_quantity":
+                          historical_coin.get(
+                              "current_sell_quantity"
+                          ),
+
+                      "buy_evidence":
+                          historical_buy_evidence,
+
+                      "sell_evidence":
+                          historical_sell_evidence,
+                  },
+
+
+                  # ------------------------------------------------
                   # DECISION
                   # ------------------------------------------------
 
@@ -802,12 +958,13 @@ jobs:
                   "decision_reason":
                       (
                           "Local evidence prepared. "
-                          "P5 V2 is included as an "
-                          "additional evidence layer. "
-                          "Final decision requires "
-                          "Paribu + P5 V2 + "
-                          "Binance + OKX "
-                          "combined analysis."
+                          "P5 V2 and Historical Orderbook "
+                          "Impact are included as evidence "
+                          "layers. Final decision requires "
+                          "combined analysis of Paribu, "
+                          "Event/Lifecycle, P5 V2, "
+                          "Historical Orderbook Impact, "
+                          "Binance and OKX."
                       )
               }
 
@@ -841,7 +998,7 @@ jobs:
           )
 
           print(
-              "LOCAL EVIDENCE SNAPSHOT + P5 V2"
+              "LOCAL EVIDENCE SNAPSHOT"
           )
 
           print(
@@ -858,6 +1015,24 @@ jobs:
           print(
               f"P5 V2 snapshot: "
               f"{p5_snapshot_at}"
+          )
+
+
+          print(
+              f"Historical Orderbook Impact available: "
+              f"{historical_available}"
+          )
+
+
+          print(
+              f"Historical method: "
+              f"{historical_method}"
+          )
+
+
+          print(
+              f"Historical snapshots: "
+              f"{historical_snapshot_count}"
           )
 
 
@@ -879,6 +1054,11 @@ jobs:
                   {}
               )
 
+              historical_item = item.get(
+                  "historical_orderbook_impact",
+                  {}
+              )
+
 
               print(
 
@@ -889,6 +1069,8 @@ jobs:
                   f"P5={p5_item.get('state')} | "
                   f"P5_actionable="
                   f"{p5_item.get('actionable_transition')} | "
+                  f"Historical="
+                  f"{historical_item.get('available')} | "
                   f"decision=DEFERRED"
 
               )
@@ -935,7 +1117,7 @@ jobs:
 
 
           git commit \
-            -m "Integrate P5 V2 evidence"
+            -m "Integrate historical orderbook evidence"
 
 
           git fetch origin main
