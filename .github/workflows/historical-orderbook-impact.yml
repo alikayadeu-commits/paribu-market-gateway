@@ -27,11 +27,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Calculate historical orderbook impact
         shell: python
         run: |
           import json
+          import math
           from pathlib import Path
           from datetime import datetime, timezone
 
@@ -42,18 +45,41 @@ jobs:
               "ATH": "ath_tl",
           }
 
+          # Price-distance bands.
           BANDS = [
-              (0.000, 0.005),
-              (0.005, 0.010),
-              (0.010, 0.020),
-              (0.020, 0.050),
+              (0.000, 0.005, "0.0-0.5%"),
+              (0.005, 0.010, "0.5-1.0%"),
+              (0.010, 0.020, "1.0-2.0%"),
+              (0.020, 0.050, "2.0-5.0%"),
           ]
+
+          # An order must remain reasonably close in price to be
+          # considered the same evolving order.
+          ORDER_PRICE_MATCH = 0.0025
+
+          # A new order lifecycle must be visible in consecutive
+          # snapshots. We allow one missing snapshot so short
+          # disappearance does not immediately terminate it.
+          MAX_MISSING_SNAPSHOTS = 1
+
+          # Ignore extremely tiny quantities.
+          MIN_QUANTITY = 0.000001
+
+          # Meaningful subsequent price response.
+          RESPONSE_THRESHOLD = 0.005
+
+          # Look at multiple future snapshots rather than only
+          # the immediately following snapshot.
+          RESPONSE_HORIZONS = (1, 3, 6)
 
           def num(value):
               try:
-                  return float(value)
+                  value = float(value)
+                  if math.isfinite(value):
+                      return value
               except Exception:
-                  return 0.0
+                  pass
+              return 0.0
 
           def parse_time(value):
               if not value:
@@ -89,10 +115,17 @@ jobs:
           def normalize_levels(levels):
               result = []
 
-              for level in levels or []:
-                  if isinstance(level, (list, tuple)) and len(level) >= 2:
-                      price = num(level[0])
-                      quantity = num(level[1])
+              if not isinstance(levels, list):
+                  return result
+
+              for level in levels:
+                  price = 0.0
+                  quantity = 0.0
+
+                  if isinstance(level, (list, tuple)):
+                      if len(level) >= 2:
+                          price = num(level[0])
+                          quantity = num(level[1])
 
                   elif isinstance(level, dict):
                       price = num(
@@ -111,26 +144,24 @@ jobs:
                               )
                           )
                       )
-                  else:
-                      continue
 
-                  if price > 0 and quantity > 0:
+                  if price > 0 and quantity > MIN_QUANTITY:
                       result.append((price, quantity))
 
               return result
 
-          def get_band(distance):
-              for low, high in BANDS:
-                  if low <= distance < high:
-                      return f"{low * 100:.1f}-{high * 100:.1f}%"
-
-              return None
-
           def extract_market(snapshot, market):
+              if not isinstance(snapshot, dict):
+                  return None
+
               markets = snapshot.get("markets", {})
+
+              if not isinstance(markets, dict):
+                  return None
+
               data = markets.get(market, {})
 
-              if not data:
+              if not isinstance(data, dict):
                   return None
 
               price = num(data.get("last"))
@@ -138,13 +169,17 @@ jobs:
               if price <= 0:
                   ticker = data.get("ticker")
 
-                  if isinstance(ticker, list) and ticker:
-                      price = num(ticker[0].get("last"))
+                  if isinstance(ticker, dict):
+                      price = num(ticker.get("last"))
 
-              if price <= 0:
-                  return None
+                  elif isinstance(ticker, list) and ticker:
+                      if isinstance(ticker[0], dict):
+                          price = num(ticker[0].get("last"))
 
-              orderbook = data.get("orderbook", data)
+              orderbook = data.get("orderbook")
+
+              if not isinstance(orderbook, dict):
+                  orderbook = data
 
               bids = normalize_levels(
                   orderbook.get("bids", [])
@@ -154,11 +189,175 @@ jobs:
                   orderbook.get("asks", [])
               )
 
+              if price <= 0:
+                  return None
+
               return {
                   "price": price,
                   "bids": bids,
                   "asks": asks,
               }
+
+          def get_band(distance):
+              for low, high, label in BANDS:
+                  if low <= distance < high:
+                      return label
+              return None
+
+          def level_distance(side, current_price, level_price):
+              if current_price <= 0:
+                  return 999.0
+
+              if side == "buy":
+                  return (
+                      current_price - level_price
+                  ) / current_price
+
+              return (
+                  level_price - current_price
+              ) / current_price
+
+          def price_response(rows, index):
+              """
+              Evaluate several future horizons.
+
+              We classify each horizon separately and then use
+              the majority direction. This avoids making the
+              entire conclusion depend on one snapshot.
+              """
+
+              responses = []
+
+              current_price = rows[index]["price"]
+
+              if current_price <= 0:
+                  return None
+
+              for horizon in RESPONSE_HORIZONS:
+
+                  future_index = index + horizon
+
+                  if future_index >= len(rows):
+                      continue
+
+                  future_price = rows[
+                      future_index
+                  ]["price"]
+
+                  if future_price <= 0:
+                      continue
+
+                  move = (
+                      future_price - current_price
+                  ) / current_price
+
+                  if move >= RESPONSE_THRESHOLD:
+                      direction = "UP"
+
+                  elif move <= -RESPONSE_THRESHOLD:
+                      direction = "DOWN"
+
+                  else:
+                      direction = "NEUTRAL"
+
+                  responses.append({
+                      "horizon": horizon,
+                      "move": move,
+                      "direction": direction,
+                  })
+
+              if not responses:
+                  return None
+
+              counts = {
+                  "UP": 0,
+                  "DOWN": 0,
+                  "NEUTRAL": 0,
+              }
+
+              for item in responses:
+                  counts[item["direction"]] += 1
+
+              direction = max(
+                  counts,
+                  key=counts.get
+              )
+
+              return {
+                  "direction": direction,
+                  "responses": responses,
+                  "up": counts["UP"],
+                  "down": counts["DOWN"],
+                  "neutral": counts["NEUTRAL"],
+              }
+
+          def match_order(
+              previous_orders,
+              price,
+              quantity,
+              current_price,
+              side
+          ):
+              """
+              Find the closest historical order candidate.
+
+              We use both price distance and size similarity.
+              This is not intended to prove identity perfectly;
+              it is a conservative lifecycle approximation.
+              """
+
+              if not previous_orders:
+                  return None
+
+              best = None
+
+              for candidate in previous_orders:
+
+                  candidate_price = candidate["price"]
+                  candidate_quantity = candidate["quantity"]
+
+                  price_gap = abs(
+                      candidate_price - price
+                  ) / max(
+                      current_price,
+                      1e-12
+                  )
+
+                  if price_gap > ORDER_PRICE_MATCH:
+                      continue
+
+                  size_similarity = (
+                      min(
+                          quantity,
+                          candidate_quantity
+                      )
+                      /
+                      max(
+                          quantity,
+                          candidate_quantity
+                      )
+                  )
+
+                  score = (
+                      price_gap * 100
+                      +
+                      (1.0 - size_similarity)
+                  )
+
+                  if best is None or score < best[0]:
+                      best = (
+                          score,
+                          candidate
+                      )
+
+              if best is None:
+                  return None
+
+              return best[1]
+
+          # --------------------------------------------------
+          # LOAD COMPLETE ORDERBOOK HISTORY
+          # --------------------------------------------------
 
           history_files = sorted(
               Path("orderbook_history").glob("*.jsonl")
@@ -167,14 +366,23 @@ jobs:
           snapshots = []
 
           for path in history_files:
+
               for row in load_jsonl(path):
+
                   timestamp = parse_time(
                       row.get("fetched_at")
                   )
 
-                  if timestamp:
-                      row["_time"] = timestamp
-                      snapshots.append(row)
+                  if timestamp is None:
+                      timestamp = parse_time(
+                          row.get("timestamp")
+                      )
+
+                  if timestamp is None:
+                      continue
+
+                  row["_time"] = timestamp
+                  snapshots.append(row)
 
           snapshots.sort(
               key=lambda row: row["_time"]
@@ -186,8 +394,12 @@ jobs:
               )
 
           print(
-              f"Loaded {len(snapshots)} orderbook snapshots."
+              f"Loaded {len(snapshots)} total orderbook snapshots."
           )
+
+          # --------------------------------------------------
+          # BUILD PER-COIN TIME SERIES
+          # --------------------------------------------------
 
           market_history = {
               coin: []
@@ -195,6 +407,7 @@ jobs:
           }
 
           for snapshot in snapshots:
+
               for coin, market in COINS.items():
 
                   data = extract_market(
@@ -212,8 +425,17 @@ jobs:
                       "asks": data["asks"],
                   })
 
+          # --------------------------------------------------
+          # BUILD ORDER LIFECYCLES
+          # --------------------------------------------------
+
           observations = {
               coin: []
+              for coin in COINS
+          }
+
+          lifecycle_counts = {
+              coin: 0
               for coin in COINS
           }
 
@@ -221,13 +443,14 @@ jobs:
 
               rows = market_history[coin]
 
-              if len(rows) < 3:
+              if len(rows) < 4:
                   continue
 
-              for index in range(len(rows) - 1):
+              for index in range(
+                  len(rows) - 1
+              ):
 
                   current = rows[index]
-                  following = rows[index + 1]
 
                   current_price = current["price"]
 
@@ -236,107 +459,235 @@ jobs:
                       ("sell", current["asks"]),
                   ):
 
-                      for price, quantity in levels:
+                      previous_levels = []
 
-                          if side == "buy":
-                              distance = (
-                                  current_price - price
-                              ) / current_price
-                          else:
-                              distance = (
-                                  price - current_price
-                              ) / current_price
+                      if index > 0:
+                          previous = rows[
+                              index - 1
+                          ]
 
-                          price_band = get_band(distance)
-
-                          if price_band is None:
-                              continue
-
-                          next_levels = (
-                              following["bids"]
+                          previous_levels = (
+                              previous["bids"]
                               if side == "buy"
-                              else following["asks"]
+                              else previous["asks"]
                           )
 
-                          comparable = None
+                      current_orders = []
 
-                          for next_price, next_quantity in next_levels:
+                      for price, quantity in levels:
+
+                          distance = level_distance(
+                              side,
+                              current_price,
+                              price
+                          )
+
+                          band = get_band(
+                              distance
+                          )
+
+                          if band is None:
+                              continue
+
+                          current_orders.append({
+                              "price": price,
+                              "quantity": quantity,
+                              "band": band,
+                          })
+
+                      for order in current_orders:
+
+                          previous_match = (
+                              match_order(
+                                  [
+                                      {
+                                          "price": p,
+                                          "quantity": q
+                                      }
+                                      for p, q
+                                      in previous_levels
+                                  ],
+                                  order["price"],
+                                  order["quantity"],
+                                  current_price,
+                                  side
+                              )
+                              if previous_levels
+                              else None
+                          )
+
+                          persisted = (
+                              previous_match
+                              is not None
+                          )
+
+                          # Examine subsequent snapshots.
+                          future_end = min(
+                              len(rows),
+                              index + 7
+                          )
+
+                          future_rows = rows[
+                              index + 1:
+                              future_end
+                          ]
+
+                          if not future_rows:
+                              continue
+
+                          # Track how long the order remains
+                          # reasonably close.
+                          persistence_steps = 0
+                          missing_steps = 0
+                          migration_values = []
+                          size_values = [
+                              order["quantity"]
+                          ]
+
+                          reference_price = (
+                              order["price"]
+                          )
+
+                          for future in future_rows:
+
+                              future_levels = (
+                                  future["bids"]
+                                  if side == "buy"
+                                  else future["asks"]
+                              )
+
+                              match = (
+                                  match_order(
+                                      [
+                                          {
+                                              "price": p,
+                                              "quantity": q
+                                          }
+                                          for p, q
+                                          in future_levels
+                                      ],
+                                      reference_price,
+                                      order["quantity"],
+                                      future["price"],
+                                      side
+                                  )
+                              )
+
+                              if match is None:
+
+                                  missing_steps += 1
+
+                                  if (
+                                      missing_steps
+                                      > MAX_MISSING_SNAPSHOTS
+                                  ):
+                                      break
+
+                                  continue
+
+                              missing_steps = 0
+                              persistence_steps += 1
+
+                              migration_values.append(
+                                  match["price"]
+                              )
+
+                              size_values.append(
+                                  match["quantity"]
+                              )
+
+                          if (
+                              persistence_steps == 0
+                              and not persisted
+                          ):
+                              resolution = (
+                                  "resolved"
+                              )
+                          elif (
+                              missing_steps
+                              > MAX_MISSING_SNAPSHOTS
+                          ):
+                              resolution = (
+                                  "resolved"
+                              )
+                          else:
+                              resolution = (
+                                  "remaining"
+                              )
+
+                          if len(
+                              migration_values
+                          ) >= 1:
+
+                              first_migration = (
+                                  migration_values[0]
+                              )
+
+                              last_migration = (
+                                  migration_values[-1]
+                              )
+
+                              migration_change = (
+                                  last_migration
+                                  - first_migration
+                              )
 
                               if (
-                                  abs(next_price - price)
-                                  / current_price
-                                  <= 0.0025
-                              ):
-                                  comparable = (
-                                      next_price,
-                                      next_quantity
+                                  abs(
+                                      migration_change
                                   )
-                                  break
+                                  /
+                                  max(
+                                      current_price,
+                                      1e-12
+                                  )
+                                  >= 0.001
+                              ):
 
-                          if comparable is None:
-                              persistence = "resolved"
-                              migration = "none"
-                          else:
-                              next_price, next_quantity = comparable
-
-                              persistence = "persisted"
-
-                              if next_price > price:
-                                  migration = "up"
-                              elif next_price < price:
-                                  migration = "down"
+                                  migration = (
+                                      "up"
+                                      if migration_change > 0
+                                      else "down"
+                                  )
                               else:
                                   migration = "none"
 
-                          responses = []
+                          else:
+                              migration = "none"
 
-                          for horizon in (1, 3, 6):
+                          response = price_response(
+                              rows,
+                              index
+                          )
 
-                              future_index = index + horizon
-
-                              if future_index >= len(rows):
-                                  continue
-
-                              future_price = rows[
-                                  future_index
-                              ]["price"]
-
-                              move = (
-                                  future_price - current_price
-                              ) / current_price
-
-                              if move > 0.005:
-                                  direction = "UP"
-                              elif move < -0.005:
-                                  direction = "DOWN"
-                              else:
-                                  direction = "NEUTRAL"
-
-                              responses.append({
-                                  "horizon": horizon,
-                                  "move": move,
-                                  "direction": direction,
-                              })
-
-                          if not responses:
+                          if response is None:
                               continue
-
-                          response = responses[0]
 
                           observations[coin].append({
                               "side": side,
-                              "band": price_band,
-                              "price": price,
-                              "quantity": quantity,
-                              "persistence": persistence,
+                              "band": order["band"],
+                              "price": order["price"],
+                              "quantity": order["quantity"],
+                              "persisted_from_previous": persisted,
+                              "persistence_steps": persistence_steps,
                               "migration": migration,
-                              "resolution": (
-                                  "resolved"
-                                  if persistence == "resolved"
-                                  else "remaining"
+                              "resolution": resolution,
+                              "size_start": order[
+                                  "quantity"
+                              ],
+                              "size_end": (
+                                  size_values[-1]
+                                  if size_values
+                                  else order["quantity"]
                               ),
-                              "response": response,
+                              "price_response": response,
                           })
+
+                          lifecycle_counts[coin] += 1
+
+          # --------------------------------------------------
+          # CURRENT SNAPSHOT
+          # --------------------------------------------------
 
           latest_path = Path(
               "data/latest.json"
@@ -353,12 +704,208 @@ jobs:
           ) as file:
               latest = json.load(file)
 
+          # --------------------------------------------------
+          # HISTORICAL MATCHING
+          # --------------------------------------------------
+
+          def historical_matches(
+              coin,
+              current_order
+          ):
+
+              matches = []
+
+              current_quantity = (
+                  current_order["quantity"]
+              )
+
+              current_band = (
+                  current_order["band"]
+              )
+
+              current_side = (
+                  current_order["side"]
+              )
+
+              for historical in observations[coin]:
+
+                  if historical["side"] != current_side:
+                      continue
+
+                  if historical["band"] != current_band:
+                      continue
+
+                  historical_quantity = (
+                      historical["quantity"]
+                  )
+
+                  if (
+                      historical_quantity <= 0
+                  ):
+                      continue
+
+                  size_similarity = (
+                      min(
+                          current_quantity,
+                          historical_quantity
+                      )
+                      /
+                      max(
+                          current_quantity,
+                          historical_quantity
+                      )
+                  )
+
+                  if size_similarity < 0.20:
+                      continue
+
+                  score = size_similarity
+
+                  if (
+                      historical[
+                          "persisted_from_previous"
+                      ]
+                  ):
+                      score += 0.10
+
+                  if (
+                      historical[
+                          "persistence_steps"
+                      ] >= 2
+                  ):
+                      score += 0.10
+
+                  if (
+                      historical[
+                          "migration"
+                      ] != "none"
+                  ):
+                      score += 0.05
+
+                  matches.append(
+                      (score, historical)
+                  )
+
+              matches.sort(
+                  key=lambda item: item[0],
+                  reverse=True
+              )
+
+              return [
+                  item[1]
+                  for item in matches[:50]
+              ]
+
+          def aggregate_evidence(matches):
+
+              if not matches:
+                  return {
+                      "direction": "INSUFFICIENT_DATA",
+                      "confidence": "INSUFFICIENT_DATA",
+                      "sample_count": 0,
+                      "up": 0,
+                      "down": 0,
+                      "neutral": 0,
+                  }
+
+              counts = {
+                  "UP": 0,
+                  "DOWN": 0,
+                  "NEUTRAL": 0,
+              }
+
+              for match in matches:
+
+                  direction = match[
+                      "price_response"
+                  ]["direction"]
+
+                  if direction in counts:
+                      counts[direction] += 1
+
+              sample_count = sum(
+                  counts.values()
+              )
+
+              if sample_count == 0:
+                  return {
+                      "direction": "INSUFFICIENT_DATA",
+                      "confidence": "INSUFFICIENT_DATA",
+                      "sample_count": 0,
+                      "up": 0,
+                      "down": 0,
+                      "neutral": 0,
+                  }
+
+              direction = max(
+                  counts,
+                  key=counts.get
+              )
+
+              ratio = (
+                  counts[direction]
+                  / sample_count
+              )
+
+              # Strong requires BOTH sufficient sample
+              # size and meaningful consistency.
+              if (
+                  sample_count >= 15
+                  and ratio >= 0.65
+              ):
+                  confidence = "STRONG"
+
+              elif (
+                  sample_count >= 8
+                  and ratio >= 0.55
+              ):
+                  confidence = "MEDIUM"
+
+              elif sample_count >= 4:
+                  confidence = "LOW"
+
+              else:
+                  confidence = "INSUFFICIENT_DATA"
+
+              return {
+                  "direction": direction,
+                  "confidence": confidence,
+                  "sample_count": sample_count,
+                  "up": counts["UP"],
+                  "down": counts["DOWN"],
+                  "neutral": counts["NEUTRAL"],
+              }
+
+          # --------------------------------------------------
+          # OUTPUT
+          # --------------------------------------------------
+
           output = {
               "generated_at": datetime.now(
                   timezone.utc
               ).isoformat(),
-              "method": "historical_orderbook_impact",
-              "historical_snapshot_count": len(snapshots),
+
+              "method": (
+                  "historical_orderbook_impact_v2"
+              ),
+
+              "historical_snapshot_count": len(
+                  snapshots
+              ),
+
+              "response_horizons": list(
+                  RESPONSE_HORIZONS
+              ),
+
+              "response_threshold": (
+                  RESPONSE_THRESHOLD
+              ),
+
+              "price_distance_bands": [
+                  label
+                  for _, _, label in BANDS
+              ],
+
               "markets": {},
           }
 
@@ -370,10 +917,14 @@ jobs:
               )
 
               if current is None:
+
                   output["markets"][coin] = {
-                      "confidence": "INSUFFICIENT_DATA",
+                      "confidence": (
+                          "INSUFFICIENT_DATA"
+                      ),
                       "historical_sample_count": 0,
                   }
+
                   continue
 
               current_price = current["price"]
@@ -387,25 +938,27 @@ jobs:
 
                   for price, quantity in levels:
 
-                      if side == "buy":
-                          distance = (
-                              current_price - price
-                          ) / current_price
-                      else:
-                          distance = (
-                              price - current_price
-                          ) / current_price
+                      distance = level_distance(
+                          side,
+                          current_price,
+                          price
+                      )
 
-                      price_band = get_band(distance)
+                      band = get_band(
+                          distance
+                      )
 
-                      if price_band is None:
+                      if band is None:
                           continue
 
                       current_orders.append({
                           "side": side,
                           "price": price,
                           "quantity": quantity,
-                          "band": price_band,
+                          "band": band,
+                          "distance_pct": (
+                              distance * 100
+                          ),
                       })
 
               buy_evidence = []
@@ -413,218 +966,102 @@ jobs:
 
               for order in current_orders:
 
-                  candidates = []
-
-                  for historical in observations[coin]:
-
-                      if historical["side"] != order["side"]:
-                          continue
-
-                      if historical["band"] != order["band"]:
-                          continue
-
-                      size_ratio = (
-                          min(
-                              order["quantity"],
-                              historical["quantity"]
-                          )
-                          /
-                          max(
-                              order["quantity"],
-                              historical["quantity"]
-                          )
-                      )
-
-                      score = size_ratio
-
-                      if historical["persistence"] == "persisted":
-                          score += 0.10
-
-                      candidates.append(
-                          (score, historical)
-                      )
-
-                  candidates.sort(
-                      key=lambda item: item[0],
-                      reverse=True
+                  matches = historical_matches(
+                      coin,
+                      order
                   )
-
-                  candidates = candidates[:25]
-
-                  up = 0
-                  down = 0
-                  neutral = 0
-
-                  for _, historical in candidates:
-
-                      direction = historical[
-                          "response"
-                      ]["direction"]
-
-                      if direction == "UP":
-                          up += 1
-                      elif direction == "DOWN":
-                          down += 1
-                      else:
-                          neutral += 1
-
-                  sample_count = (
-                      up + down + neutral
-                  )
-
-                  if sample_count == 0:
-                      direction = "INSUFFICIENT_DATA"
-                      confidence = "INSUFFICIENT_DATA"
-                  else:
-                      counts = {
-                          "UP": up,
-                          "DOWN": down,
-                          "NEUTRAL": neutral,
-                      }
-
-                      direction = max(
-                          counts,
-                          key=counts.get
-                      )
-
-                      consistency = (
-                          counts[direction]
-                          / sample_count
-                      )
-
-                      if (
-                          sample_count >= 8
-                          and consistency >= 0.65
-                      ):
-                          confidence = "STRONG"
-                      elif (
-                          sample_count >= 4
-                          and consistency >= 0.55
-                      ):
-                          confidence = "MEDIUM"
-                      else:
-                          confidence = "LOW"
 
                   evidence = {
                       "side": order["side"],
                       "price": order["price"],
                       "quantity": order["quantity"],
                       "band": order["band"],
-                      "historical_sample_count": sample_count,
-                      "historical_direction": direction,
-                      "confidence": confidence,
-                      "up_count": up,
-                      "down_count": down,
-                      "neutral_count": neutral,
+                      "distance_pct": order[
+                          "distance_pct"
+                      ],
+                      "historical_matches": (
+                          len(matches)
+                      ),
+                      "historical_impact": (
+                          aggregate_evidence(matches)
+                      ),
                   }
 
                   if order["side"] == "buy":
-                      buy_evidence.append(evidence)
+                      buy_evidence.append(
+                          evidence
+                      )
                   else:
-                      sell_evidence.append(evidence)
+                      sell_evidence.append(
+                          evidence
+                      )
 
-              def aggregate(evidence):
+              buy_impact = aggregate_evidence(
+                  [
+                      match
+                      for order in buy_evidence
+                      for match in historical_matches(
+                          coin,
+                          order
+                      )
+                  ]
+              )
 
-                  if not evidence:
-                      return {
-                          "direction": "INSUFFICIENT_DATA",
-                          "confidence": "INSUFFICIENT_DATA",
-                          "sample_count": 0,
-                      }
-
-                  counts = {
-                      "UP": 0,
-                      "DOWN": 0,
-                      "NEUTRAL": 0,
-                  }
-
-                  samples = 0
-
-                  for item in evidence:
-
-                      direction = item[
-                          "historical_direction"
-                      ]
-
-                      count = item[
-                          "historical_sample_count"
-                      ]
-
-                      if direction in counts:
-                          counts[direction] += count
-
-                      samples += count
-
-                  if samples == 0:
-                      return {
-                          "direction": "INSUFFICIENT_DATA",
-                          "confidence": "INSUFFICIENT_DATA",
-                          "sample_count": 0,
-                      }
-
-                  direction = max(
-                      counts,
-                      key=counts.get
-                  )
-
-                  ratio = (
-                      counts[direction]
-                      / samples
-                  )
-
-                  if (
-                      samples >= 15
-                      and ratio >= 0.65
-                  ):
-                      confidence = "STRONG"
-                  elif (
-                      samples >= 6
-                      and ratio >= 0.55
-                  ):
-                      confidence = "MEDIUM"
-                  else:
-                      confidence = "LOW"
-
-                  return {
-                      "direction": direction,
-                      "confidence": confidence,
-                      "sample_count": samples,
-                      "up": counts["UP"],
-                      "down": counts["DOWN"],
-                      "neutral": counts["NEUTRAL"],
-                  }
+              sell_impact = aggregate_evidence(
+                  [
+                      match
+                      for order in sell_evidence
+                      for match in historical_matches(
+                          coin,
+                          order
+                      )
+                  ]
+              )
 
               output["markets"][coin] = {
+
+                  "current_price": current_price,
+
                   "current_relevant_buy_levels": len(
                       buy_evidence
                   ),
+
                   "current_relevant_sell_levels": len(
                       sell_evidence
                   ),
+
                   "current_buy_quantity": sum(
                       item["quantity"]
                       for item in current_orders
                       if item["side"] == "buy"
                   ),
+
                   "current_sell_quantity": sum(
                       item["quantity"]
                       for item in current_orders
                       if item["side"] == "sell"
                   ),
-                  "historical_buy_impact": aggregate(
-                      buy_evidence
-                  ),
-                  "historical_sell_impact": aggregate(
-                      sell_evidence
-                  ),
-                  "buy_evidence": buy_evidence,
-                  "sell_evidence": sell_evidence,
+
+                  "historical_buy_impact": buy_impact,
+
+                  "historical_sell_impact": sell_impact,
+
                   "historical_sample_count": len(
                       observations[coin]
                   ),
+
+                  "lifecycle_count": (
+                      lifecycle_counts[coin]
+                  ),
+
+                  "buy_evidence": buy_evidence,
+
+                  "sell_evidence": sell_evidence,
               }
 
-          Path("state").mkdir(exist_ok=True)
+          Path("state").mkdir(
+              exist_ok=True
+          )
 
           output_path = Path(
               "state/historical_orderbook_impact.json"
@@ -634,6 +1071,7 @@ jobs:
               "w",
               encoding="utf-8"
           ) as file:
+
               json.dump(
                   output,
                   file,
