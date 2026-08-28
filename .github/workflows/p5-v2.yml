@@ -1784,8 +1784,30 @@ jobs:
           git commit \
             -m "Update P5 V2 materiality calibration"
 
-          git fetch origin main
+          for attempt in 1 2 3 4 5; do
 
-          git rebase origin/main
+            echo "Push attempt ${attempt}/5"
 
-          git push origin HEAD:main
+            git fetch origin main
+
+            git rebase origin/main
+
+            if git push origin HEAD:main; then
+
+              echo "Push successful."
+
+              exit 0
+
+            fi
+
+            echo "Push rejected because main changed concurrently."
+
+            git rebase --abort || true
+
+            sleep 2
+
+          done
+
+          echo "Failed to push after 5 attempts."
+
+          exit 1
