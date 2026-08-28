@@ -91,6 +91,23 @@ jobs:
 
 
           # ========================================================
+          # WORKFLOW SOURCE
+          # ========================================================
+
+          workflow_source = (
+              "manual"
+              if "${{ github.event_name }}" == "workflow_dispatch"
+              else "${{ github.event.workflow_run.name }}"
+          )
+
+
+          print(
+              f"Adaptive Decision Engine triggered by: "
+              f"{workflow_source}"
+          )
+
+
+          # ========================================================
           # LOAD PARIBU SNAPSHOT
           # ========================================================
 
@@ -557,6 +574,9 @@ jobs:
               "snapshot_at":
                   fetched_at,
 
+              "workflow_source":
+                  workflow_source,
+
               "mode":
                   "LOCAL_EVIDENCE_ONLY",
 
@@ -701,6 +721,7 @@ jobs:
                       "prediction_horizon",
                       {}
                   )
+              )
 
 
               p5_evidence = (
@@ -1007,6 +1028,12 @@ jobs:
 
 
           print(
+              f"Workflow source: "
+              f"{workflow_source}"
+          )
+
+
+          print(
               f"P5 V2 available: "
               f"{p5_available}"
           )
@@ -1039,6 +1066,12 @@ jobs:
           print(
               f"Paribu snapshot: "
               f"{fetched_at}"
+          )
+
+
+          print(
+              f"Paribu snapshot age: "
+              f"{age_seconds:.0f}s"
           )
 
 
