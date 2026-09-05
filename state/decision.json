@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-09-05T22:31:29.772677+00:00",
-  "snapshot_at": "2026-09-05T22:30:39Z",
+  "generated_at": "2026-09-05T22:46:19.536965+00:00",
+  "snapshot_at": "2026-09-05T22:45:33Z",
   "workflow_source": "Historical Orderbook Impact",
   "mode": "LOCAL_EVIDENCE_ONLY",
   "decision_authority": "EXTERNAL_DECISION_SUPPORT_ENGINE",
@@ -8,20 +8,20 @@
     "available": true,
     "version": "V2",
     "status": "FROZEN",
-    "snapshot_at": "2026-09-05T22:30:39Z",
+    "snapshot_at": "2026-09-05T22:45:33Z",
     "snapshot_matches": true,
     "data_healthy": true
   },
   "historical_orderbook_impact": {
     "available": true,
     "method": "historical_orderbook_impact_v2",
-    "historical_snapshot_count": 1219
+    "historical_snapshot_count": 1220
   },
   "coins": {
     "VIRTUAL": {
       "price": 33.49,
       "volume": 32543.31,
-      "orderbook_pressure": "demand_heavy",
+      "orderbook_pressure": "balanced",
       "last_event": "REVERSAL_DOWN",
       "event_detected_at": "2026-09-05T22:30:53.584239+00:00",
       "event_fetched_at": "2026-09-05T22:30:39Z",
@@ -34,14 +34,25 @@
       "last_evidence_at": "2026-09-05T20:16:04.834468+00:00",
       "p5_v2": {
         "available": true,
-        "state": "DEMAND_BIAS",
+        "state": "WEAKENING",
         "actionable_transition": false,
         "imbalance": {
-          "value": 0.7241109102688994,
-          "state": "DEMAND",
+          "value": 0.14266492721456148,
+          "state": "NEUTRAL",
           "threshold": 0.3
         },
         "bid_wall": {
+          "price": null,
+          "materiality": null,
+          "class": null,
+          "distance": null,
+          "persistence": 0,
+          "persistence_status": "OBSERVATION",
+          "migration": false,
+          "displacement": null,
+          "resolution": false
+        },
+        "ask_wall": {
           "price": null,
           "materiality": null,
           "class": null,
@@ -52,17 +63,6 @@
           "displacement": null,
           "resolution": true
         },
-        "ask_wall": {
-          "price": 33.54,
-          "materiality": 0.7575424261591372,
-          "class": "MATERIAL",
-          "distance": 0.0034405385190726103,
-          "persistence": 0,
-          "persistence_status": "OBSERVATION",
-          "migration": false,
-          "displacement": null,
-          "resolution": false
-        },
         "prediction_horizon": {
           "snapshots": 3,
           "minutes": 45
@@ -70,8 +70,8 @@
         "evidence": {
           "bid_migration": false,
           "ask_migration": false,
-          "bid_resolution": true,
-          "ask_resolution": false,
+          "bid_resolution": false,
+          "ask_resolution": true,
           "bid_persistence_confirmed": false,
           "ask_persistence_confirmed": false
         }
@@ -81,88 +81,72 @@
         "historical_buy_impact": {
           "direction": "NEUTRAL",
           "confidence": "STRONG",
-          "sample_count": 250,
-          "up": 28,
-          "down": 54,
-          "neutral": 168
+          "sample_count": 200,
+          "up": 17,
+          "down": 41,
+          "neutral": 142
         },
         "historical_sell_impact": {
           "direction": "NEUTRAL",
-          "confidence": "MEDIUM",
-          "sample_count": 450,
-          "up": 89,
-          "down": 99,
-          "neutral": 262
+          "confidence": "LOW",
+          "sample_count": 300,
+          "up": 73,
+          "down": 73,
+          "neutral": 154
         },
-        "historical_sample_count": 14868,
-        "lifecycle_count": 14868,
-        "current_relevant_buy_levels": 5,
-        "current_relevant_sell_levels": 9,
-        "current_buy_quantity": 7539.33,
-        "current_sell_quantity": 4328.6,
+        "historical_sample_count": 14882,
+        "lifecycle_count": 14882,
+        "current_relevant_buy_levels": 4,
+        "current_relevant_sell_levels": 6,
+        "current_buy_quantity": 2698.31,
+        "current_sell_quantity": 2838.14,
         "buy_evidence": [
           {
             "side": "buy",
             "price": 33.31,
-            "quantity": 3550.38,
+            "quantity": 310.81,
             "band": "0.5-1.0%",
             "distance_pct": 0.5374738727978492,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
-              "confidence": "MEDIUM",
+              "confidence": "STRONG",
               "sample_count": 50,
-              "up": 6,
-              "down": 15,
-              "neutral": 29
+              "up": 5,
+              "down": 9,
+              "neutral": 36
             }
           },
           {
             "side": "buy",
-            "price": 33.3,
-            "quantity": 2089.73,
+            "price": 33.28,
+            "quantity": 1272.92,
             "band": "0.5-1.0%",
-            "distance_pct": 0.5673335323977451,
+            "distance_pct": 0.6270528515974944,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
-              "confidence": "MEDIUM",
+              "confidence": "LOW",
               "sample_count": 50,
-              "up": 4,
-              "down": 17,
-              "neutral": 29
+              "up": 7,
+              "down": 20,
+              "neutral": 23
             }
           },
           {
             "side": "buy",
-            "price": 33.29,
-            "quantity": 961.1,
+            "price": 33.27,
+            "quantity": 801.65,
             "band": "0.5-1.0%",
-            "distance_pct": 0.5971931919976197,
+            "distance_pct": 0.6569125111973689,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
               "up": 2,
-              "down": 11,
-              "neutral": 37
-            }
-          },
-          {
-            "side": "buy",
-            "price": 31.99,
-            "quantity": 625.19,
-            "band": "2.0-5.0%",
-            "distance_pct": 4.478948939982094,
-            "historical_matches": 50,
-            "historical_impact": {
-              "direction": "NEUTRAL",
-              "confidence": "MEDIUM",
-              "sample_count": 50,
-              "up": 13,
-              "down": 6,
-              "neutral": 31
+              "down": 7,
+              "neutral": 41
             }
           },
           {
@@ -185,66 +169,18 @@
         "sell_evidence": [
           {
             "side": "sell",
-            "price": 33.54,
-            "quantity": 794.57,
-            "band": "0.0-0.5%",
-            "distance_pct": 0.1492982979993943,
-            "historical_matches": 50,
-            "historical_impact": {
-              "direction": "NEUTRAL",
-              "confidence": "STRONG",
-              "sample_count": 50,
-              "up": 5,
-              "down": 5,
-              "neutral": 40
-            }
-          },
-          {
-            "side": "sell",
-            "price": 33.59,
-            "quantity": 253.93,
-            "band": "0.0-0.5%",
-            "distance_pct": 0.29859659599880983,
-            "historical_matches": 50,
-            "historical_impact": {
-              "direction": "NEUTRAL",
-              "confidence": "STRONG",
-              "sample_count": 50,
-              "up": 4,
-              "down": 3,
-              "neutral": 43
-            }
-          },
-          {
-            "side": "sell",
-            "price": 33.89,
-            "quantity": 923.51,
-            "band": "1.0-2.0%",
-            "distance_pct": 1.1943863839952182,
-            "historical_matches": 50,
-            "historical_impact": {
-              "direction": "NEUTRAL",
-              "confidence": "MEDIUM",
-              "sample_count": 50,
-              "up": 10,
-              "down": 8,
-              "neutral": 32
-            }
-          },
-          {
-            "side": "sell",
             "price": 33.99,
-            "quantity": 630.46,
+            "quantity": 1112.01,
             "band": "1.0-2.0%",
             "distance_pct": 1.492982979994028,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
-              "confidence": "LOW",
+              "confidence": "STRONG",
               "sample_count": 50,
-              "up": 11,
-              "down": 12,
-              "neutral": 27
+              "up": 14,
+              "down": 2,
+              "neutral": 34
             }
           },
           {
@@ -259,8 +195,8 @@
               "confidence": "LOW",
               "sample_count": 50,
               "up": 12,
-              "down": 17,
-              "neutral": 21
+              "down": 16,
+              "neutral": 22
             }
           },
           {
@@ -275,8 +211,8 @@
               "confidence": "STRONG",
               "sample_count": 50,
               "up": 7,
-              "down": 5,
-              "neutral": 38
+              "down": 6,
+              "neutral": 37
             }
           },
           {
@@ -333,26 +269,26 @@
       "decision_reason": "Local evidence prepared. P5 V2 and Historical Orderbook Impact are included as evidence layers. Final decision requires combined analysis of Paribu, Event/Lifecycle, P5 V2, Historical Orderbook Impact, Binance and OKX."
     },
     "FET": {
-      "price": 7.985,
-      "volume": 3225860.3,
-      "orderbook_pressure": "supply_heavy",
+      "price": 7.983,
+      "volume": 3218867.1,
+      "orderbook_pressure": "demand_heavy",
       "last_event": "REVERSAL_DOWN",
-      "event_detected_at": "2026-09-05T22:30:53.584577+00:00",
-      "event_fetched_at": "2026-09-05T22:30:39Z",
+      "event_detected_at": "2026-09-05T22:45:47.322042+00:00",
+      "event_fetched_at": "2026-09-05T22:45:33Z",
       "event_previous_state": "REVERSAL_DOWN",
       "event_current_state": "REVERSAL_DOWN",
       "event_reason": "Önceki güçlenme sonrasında fiyat yönü aşağı dönüyor.",
       "lifecycle_state": "REVERSAL_DOWN",
-      "lifecycle_updated_at": "2026-09-05T22:30:53.584577+00:00",
+      "lifecycle_updated_at": "2026-09-05T22:45:47.322042+00:00",
       "last_evidence_event": "SUPPLY_PRESSURE",
       "last_evidence_at": "2026-09-05T20:31:12.025982+00:00",
       "p5_v2": {
         "available": true,
-        "state": "DEMAND_BIAS",
+        "state": "WEAKENING",
         "actionable_transition": false,
         "imbalance": {
-          "value": 0.3943336331865156,
-          "state": "DEMAND",
+          "value": 0.2412398669876491,
+          "state": "NEUTRAL",
           "threshold": 0.3
         },
         "bid_wall": {
@@ -395,32 +331,64 @@
         "historical_buy_impact": {
           "direction": "NEUTRAL",
           "confidence": "MEDIUM",
-          "sample_count": 600,
-          "up": 111,
-          "down": 101,
-          "neutral": 388
+          "sample_count": 650,
+          "up": 122,
+          "down": 107,
+          "neutral": 421
         },
         "historical_sell_impact": {
           "direction": "NEUTRAL",
           "confidence": "MEDIUM",
-          "sample_count": 1000,
-          "up": 214,
+          "sample_count": 950,
+          "up": 212,
           "down": 188,
-          "neutral": 598
+          "neutral": 550
         },
-        "historical_sample_count": 37710,
-        "lifecycle_count": 37710,
-        "current_relevant_buy_levels": 12,
-        "current_relevant_sell_levels": 20,
-        "current_buy_quantity": 49519.5,
-        "current_sell_quantity": 150731.5,
+        "historical_sample_count": 37742,
+        "lifecycle_count": 37742,
+        "current_relevant_buy_levels": 13,
+        "current_relevant_sell_levels": 19,
+        "current_buy_quantity": 62423.4,
+        "current_sell_quantity": 61565.5,
         "buy_evidence": [
           {
             "side": "buy",
-            "price": 7.984,
-            "quantity": 1791.4,
+            "price": 7.97,
+            "quantity": 8898.5,
             "band": "0.0-0.5%",
-            "distance_pct": 0.012523481527868929,
+            "distance_pct": 0.1628460478516836,
+            "historical_matches": 50,
+            "historical_impact": {
+              "direction": "NEUTRAL",
+              "confidence": "MEDIUM",
+              "sample_count": 50,
+              "up": 15,
+              "down": 3,
+              "neutral": 32
+            }
+          },
+          {
+            "side": "buy",
+            "price": 7.969,
+            "quantity": 2700.6,
+            "band": "0.0-0.5%",
+            "distance_pct": 0.17537266691719086,
+            "historical_matches": 50,
+            "historical_impact": {
+              "direction": "NEUTRAL",
+              "confidence": "STRONG",
+              "sample_count": 50,
+              "up": 11,
+              "down": 3,
+              "neutral": 36
+            }
+          },
+          {
+            "side": "buy",
+            "price": 7.965,
+            "quantity": 1836.0,
+            "band": "0.0-0.5%",
+            "distance_pct": 0.22547914317925336,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -433,66 +401,50 @@
           },
           {
             "side": "buy",
-            "price": 7.979,
-            "quantity": 1814.0,
+            "price": 7.948,
+            "quantity": 5956.5,
             "band": "0.0-0.5%",
-            "distance_pct": 0.07514088916719132,
+            "distance_pct": 0.43843166729298827,
+            "historical_matches": 50,
+            "historical_impact": {
+              "direction": "NEUTRAL",
+              "confidence": "STRONG",
+              "sample_count": 50,
+              "up": 14,
+              "down": 1,
+              "neutral": 35
+            }
+          },
+          {
+            "side": "buy",
+            "price": 7.947,
+            "quantity": 3788.4,
+            "band": "0.0-0.5%",
+            "distance_pct": 0.4509582863585067,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
               "up": 12,
-              "down": 4,
-              "neutral": 34
-            }
-          },
-          {
-            "side": "buy",
-            "price": 7.978,
-            "quantity": 1771.2,
-            "band": "0.0-0.5%",
-            "distance_pct": 0.08766437069506025,
-            "historical_matches": 50,
-            "historical_impact": {
-              "direction": "NEUTRAL",
-              "confidence": "STRONG",
-              "sample_count": 50,
-              "up": 9,
               "down": 5,
-              "neutral": 36
-            }
-          },
-          {
-            "side": "buy",
-            "price": 7.961,
-            "quantity": 3601.3,
-            "band": "0.0-0.5%",
-            "distance_pct": 0.3005635566687542,
-            "historical_matches": 50,
-            "historical_impact": {
-              "direction": "NEUTRAL",
-              "confidence": "STRONG",
-              "sample_count": 50,
-              "up": 13,
-              "down": 3,
-              "neutral": 34
+              "neutral": 33
             }
           },
           {
             "side": "buy",
             "price": 7.923,
-            "quantity": 5490.8,
+            "quantity": 4174.8,
             "band": "0.5-1.0%",
-            "distance_pct": 0.7764558547276177,
+            "distance_pct": 0.7515971439308482,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "MEDIUM",
               "sample_count": 50,
-              "up": 10,
-              "down": 9,
-              "neutral": 31
+              "up": 6,
+              "down": 16,
+              "neutral": 28
             }
           },
           {
@@ -500,7 +452,7 @@
             "price": 7.823,
             "quantity": 8000.0,
             "band": "2.0-5.0%",
-            "distance_pct": 2.028804007514088,
+            "distance_pct": 2.0042590504822657,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -516,7 +468,7 @@
             "price": 7.8,
             "quantity": 2052.0,
             "band": "2.0-5.0%",
-            "distance_pct": 2.316844082654984,
+            "distance_pct": 2.2923712889890995,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -529,10 +481,10 @@
           },
           {
             "side": "buy",
-            "price": 7.798,
-            "quantity": 8176.4,
+            "price": 7.781,
+            "quantity": 8194.2,
             "band": "2.0-5.0%",
-            "distance_pct": 2.341891045710711,
+            "distance_pct": 2.5303770512338715,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -548,15 +500,15 @@
             "price": 7.75,
             "quantity": 1613.1,
             "band": "2.0-5.0%",
-            "distance_pct": 2.9430181590482194,
+            "distance_pct": 2.918702242264809,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
-              "up": 7,
+              "up": 6,
               "down": 8,
-              "neutral": 35
+              "neutral": 36
             }
           },
           {
@@ -564,15 +516,15 @@
             "price": 7.723,
             "quantity": 13770.5,
             "band": "2.0-5.0%",
-            "distance_pct": 3.281152160300569,
+            "distance_pct": 3.256920957033694,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "MEDIUM",
               "sample_count": 50,
-              "up": 13,
-              "down": 8,
-              "neutral": 29
+              "up": 12,
+              "down": 7,
+              "neutral": 31
             }
           },
           {
@@ -580,15 +532,15 @@
             "price": 7.65,
             "quantity": 126.6,
             "band": "2.0-5.0%",
-            "distance_pct": 4.1953663118346896,
+            "distance_pct": 4.171364148816226,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
-              "confidence": "MEDIUM",
+              "confidence": "STRONG",
               "sample_count": 50,
-              "up": 10,
+              "up": 9,
               "down": 8,
-              "neutral": 32
+              "neutral": 33
             }
           },
           {
@@ -596,7 +548,7 @@
             "price": 7.62,
             "quantity": 1312.2,
             "band": "2.0-5.0%",
-            "distance_pct": 4.571070757670635,
+            "distance_pct": 4.547162720781656,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -611,81 +563,65 @@
         "sell_evidence": [
           {
             "side": "sell",
-            "price": 7.999,
-            "quantity": 1814.0,
+            "price": 8.007,
+            "quantity": 2700.6,
             "band": "0.0-0.5%",
-            "distance_pct": 0.17532874139009827,
+            "distance_pct": 0.3006388575723415,
+            "historical_matches": 50,
+            "historical_impact": {
+              "direction": "NEUTRAL",
+              "confidence": "STRONG",
+              "sample_count": 50,
+              "up": 3,
+              "down": 13,
+              "neutral": 34
+            }
+          },
+          {
+            "side": "sell",
+            "price": 8.008,
+            "quantity": 3686.2,
+            "band": "0.0-0.5%",
+            "distance_pct": 0.31316547663784877,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
               "up": 5,
-              "down": 7,
-              "neutral": 38
-            }
-          },
-          {
-            "side": "sell",
-            "price": 8.001,
-            "quantity": 1823.0,
-            "band": "0.0-0.5%",
-            "distance_pct": 0.20037570444582498,
-            "historical_matches": 50,
-            "historical_impact": {
-              "direction": "NEUTRAL",
-              "confidence": "STRONG",
-              "sample_count": 50,
-              "up": 1,
-              "down": 7,
-              "neutral": 42
-            }
-          },
-          {
-            "side": "sell",
-            "price": 8.011,
-            "quantity": 1673.1,
-            "band": "0.0-0.5%",
-            "distance_pct": 0.32561051972446975,
-            "historical_matches": 50,
-            "historical_impact": {
-              "direction": "NEUTRAL",
-              "confidence": "STRONG",
-              "sample_count": 50,
-              "up": 2,
-              "down": 7,
-              "neutral": 41
+              "down": 5,
+              "neutral": 40
             }
           },
           {
             "side": "sell",
             "price": 8.03,
-            "quantity": 2796.3,
+            "quantity": 2820.7,
             "band": "0.5-1.0%",
-            "distance_pct": 0.5635566687539015,
+            "distance_pct": 0.5887510960791646,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "MEDIUM",
               "sample_count": 50,
-              "up": 13,
-              "down": 5,
+              "up": 14,
+              "down": 4,
               "neutral": 32
             }
           },
           {
             "side": "sell",
             "price": 8.04,
-            "quantity": 1279.7,
+            "quantity": 13.0,
             "band": "0.5-1.0%",
-            "distance_pct": 0.6887914840325463,
+            "distance_pct": 0.7140172867343041,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "LOW",
               "sample_count": 50,
-              "up": 16,
-              "down": 7,
+              "up": 7,
+              "down": 16,
               "neutral": 27
             }
           },
@@ -694,7 +630,7 @@
             "price": 8.05,
             "quantity": 62.1,
             "band": "0.5-1.0%",
-            "distance_pct": 0.8140262993112133,
+            "distance_pct": 0.8392834773894658,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -710,15 +646,15 @@
             "price": 8.07,
             "quantity": 105.3,
             "band": "1.0-2.0%",
-            "distance_pct": 1.0644959298685028,
+            "distance_pct": 1.0898158586997448,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "MEDIUM",
               "sample_count": 50,
-              "up": 15,
+              "up": 14,
               "down": 5,
-              "neutral": 30
+              "neutral": 31
             }
           },
           {
@@ -726,47 +662,31 @@
             "price": 8.09,
             "quantity": 169.9,
             "band": "1.0-2.0%",
-            "distance_pct": 1.3149655604257924,
+            "distance_pct": 1.340348240010024,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "LOW",
               "sample_count": 50,
-              "up": 13,
+              "up": 12,
               "down": 11,
-              "neutral": 26
-            }
-          },
-          {
-            "side": "sell",
-            "price": 8.1,
-            "quantity": 11820.5,
-            "band": "1.0-2.0%",
-            "distance_pct": 1.4402003757044373,
-            "historical_matches": 50,
-            "historical_impact": {
-              "direction": "NEUTRAL",
-              "confidence": "LOW",
-              "sample_count": 50,
-              "up": 21,
-              "down": 2,
               "neutral": 27
             }
           },
           {
             "side": "sell",
-            "price": 8.101,
-            "quantity": 89000.4,
+            "price": 8.1,
+            "quantity": 2227.1,
             "band": "1.0-2.0%",
-            "distance_pct": 1.4527238572323176,
+            "distance_pct": 1.4656144306651635,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
-              "confidence": "STRONG",
+              "confidence": "LOW",
               "sample_count": 50,
-              "up": 4,
-              "down": 12,
-              "neutral": 34
+              "up": 19,
+              "down": 5,
+              "neutral": 26
             }
           },
           {
@@ -774,15 +694,15 @@
             "price": 8.11,
             "quantity": 21.0,
             "band": "1.0-2.0%",
-            "distance_pct": 1.5654351909830821,
+            "distance_pct": 1.5908806213203028,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
-              "up": 8,
-              "down": 9,
-              "neutral": 33
+              "up": 7,
+              "down": 8,
+              "neutral": 35
             }
           },
           {
@@ -790,7 +710,7 @@
             "price": 8.113,
             "quantity": 20.0,
             "band": "1.0-2.0%",
-            "distance_pct": 1.6030056355666777,
+            "distance_pct": 1.628460478516847,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -806,15 +726,31 @@
             "price": 8.13,
             "quantity": 36.0,
             "band": "1.0-2.0%",
-            "distance_pct": 1.815904821540394,
+            "distance_pct": 1.8414130026306041,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "MEDIUM",
               "sample_count": 50,
-              "up": 6,
+              "up": 5,
               "down": 14,
-              "neutral": 30
+              "neutral": 31
+            }
+          },
+          {
+            "side": "sell",
+            "price": 8.149,
+            "quantity": 9593.4,
+            "band": "2.0-5.0%",
+            "distance_pct": 2.0794187648753537,
+            "historical_matches": 50,
+            "historical_impact": {
+              "direction": "NEUTRAL",
+              "confidence": "LOW",
+              "sample_count": 50,
+              "up": 19,
+              "down": 6,
+              "neutral": 25
             }
           },
           {
@@ -822,15 +758,15 @@
             "price": 8.15,
             "quantity": 2335.2,
             "band": "2.0-5.0%",
-            "distance_pct": 2.0663744520976834,
+            "distance_pct": 2.091945383940883,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "LOW",
               "sample_count": 50,
-              "up": 13,
+              "up": 12,
               "down": 14,
-              "neutral": 23
+              "neutral": 24
             }
           },
           {
@@ -838,7 +774,7 @@
             "price": 8.168,
             "quantity": 55.0,
             "band": "2.0-5.0%",
-            "distance_pct": 2.2917971195992353,
+            "distance_pct": 2.3174245271201257,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -854,15 +790,15 @@
             "price": 8.179,
             "quantity": 1299.0,
             "band": "2.0-5.0%",
-            "distance_pct": 2.4295554164057602,
+            "distance_pct": 2.4552173368407946,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
-              "confidence": "LOW",
+              "confidence": "MEDIUM",
               "sample_count": 50,
-              "up": 11,
+              "up": 10,
               "down": 12,
-              "neutral": 27
+              "neutral": 28
             }
           },
           {
@@ -870,15 +806,15 @@
             "price": 8.18,
             "quantity": 611.2,
             "band": "2.0-5.0%",
-            "distance_pct": 2.442078897933618,
+            "distance_pct": 2.4677439559063017,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "LOW",
               "sample_count": 50,
               "up": 16,
-              "down": 12,
-              "neutral": 22
+              "down": 11,
+              "neutral": 23
             }
           },
           {
@@ -886,15 +822,15 @@
             "price": 8.2,
             "quantity": 11128.7,
             "band": "2.0-5.0%",
-            "distance_pct": 2.6925485284909074,
+            "distance_pct": 2.718276337216581,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "MEDIUM",
               "sample_count": 50,
-              "up": 12,
+              "up": 11,
               "down": 8,
-              "neutral": 30
+              "neutral": 31
             }
           },
           {
@@ -902,7 +838,7 @@
             "price": 8.22,
             "quantity": 3892.0,
             "band": "2.0-5.0%",
-            "distance_pct": 2.9430181590482194,
+            "distance_pct": 2.968808718526882,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -918,7 +854,7 @@
             "price": 8.23,
             "quantity": 20789.1,
             "band": "2.0-5.0%",
-            "distance_pct": 3.0682529743268643,
+            "distance_pct": 3.0940749091820217,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "UP",
@@ -935,49 +871,49 @@
       "decision_reason": "Local evidence prepared. P5 V2 and Historical Orderbook Impact are included as evidence layers. Final decision requires combined analysis of Paribu, Event/Lifecycle, P5 V2, Historical Orderbook Impact, Binance and OKX."
     },
     "KITE": {
-      "price": 6.106,
-      "volume": 2557906.3,
+      "price": 6.091,
+      "volume": 2544702.8,
       "orderbook_pressure": "supply_heavy",
       "last_event": "SUPPLY_PRESSURE",
-      "event_detected_at": "2026-09-05T22:30:53.584992+00:00",
-      "event_fetched_at": "2026-09-05T22:30:39Z",
+      "event_detected_at": "2026-09-05T22:45:47.322528+00:00",
+      "event_fetched_at": "2026-09-05T22:45:33Z",
       "event_previous_state": "REVERSAL_DOWN",
       "event_current_state": "REVERSAL_DOWN",
       "event_reason": "Negatif fiyat hareketi sırasında görünür satış likiditesi baskın.",
       "lifecycle_state": "REVERSAL_DOWN",
       "lifecycle_updated_at": "2026-09-05T22:15:51.094398+00:00",
       "last_evidence_event": "SUPPLY_PRESSURE",
-      "last_evidence_at": "2026-09-05T22:30:53.584992+00:00",
+      "last_evidence_at": "2026-09-05T22:45:47.322528+00:00",
       "p5_v2": {
         "available": true,
-        "state": "WEAKENING",
+        "state": "DEMAND_BIAS",
         "actionable_transition": false,
         "imbalance": {
-          "value": -0.10896512492449797,
-          "state": "NEUTRAL",
+          "value": 0.3150173788568501,
+          "state": "DEMAND",
           "threshold": 0.3
         },
         "bid_wall": {
-          "price": 6.101,
-          "materiality": 0.8333594203712945,
-          "class": "DOMINANT",
-          "distance": 0.0011460379829732418,
-          "persistence": 0,
-          "persistence_status": "OBSERVATION",
-          "migration": false,
-          "displacement": null,
-          "resolution": false
-        },
-        "ask_wall": {
-          "price": 6.112,
-          "materiality": 0.6943838081953543,
-          "class": "MATERIAL",
-          "distance": 0.0006548788474131564,
+          "price": null,
+          "materiality": null,
+          "class": null,
+          "distance": null,
           "persistence": 1,
           "persistence_status": "OBSERVATION",
           "migration": false,
-          "displacement": 0.00147034798235588,
-          "resolution": false
+          "displacement": null,
+          "resolution": true
+        },
+        "ask_wall": {
+          "price": null,
+          "materiality": null,
+          "class": null,
+          "distance": null,
+          "persistence": 2,
+          "persistence_status": "CANDIDATE",
+          "migration": false,
+          "displacement": null,
+          "resolution": true
         },
         "prediction_horizon": {
           "snapshots": 3,
@@ -986,8 +922,8 @@
         "evidence": {
           "bid_migration": false,
           "ask_migration": false,
-          "bid_resolution": false,
-          "ask_resolution": false,
+          "bid_resolution": true,
+          "ask_resolution": true,
           "bid_persistence_confirmed": false,
           "ask_persistence_confirmed": false
         }
@@ -998,31 +934,31 @@
           "direction": "NEUTRAL",
           "confidence": "STRONG",
           "sample_count": 1000,
-          "up": 139,
-          "down": 117,
-          "neutral": 744
+          "up": 144,
+          "down": 152,
+          "neutral": 704
         },
         "historical_sell_impact": {
           "direction": "NEUTRAL",
           "confidence": "MEDIUM",
-          "sample_count": 650,
-          "up": 152,
-          "down": 106,
-          "neutral": 392
+          "sample_count": 600,
+          "up": 129,
+          "down": 107,
+          "neutral": 364
         },
-        "historical_sample_count": 20648,
-        "lifecycle_count": 20648,
+        "historical_sample_count": 20681,
+        "lifecycle_count": 20681,
         "current_relevant_buy_levels": 20,
-        "current_relevant_sell_levels": 13,
-        "current_buy_quantity": 59248.4,
-        "current_sell_quantity": 78935.3,
+        "current_relevant_sell_levels": 12,
+        "current_buy_quantity": 63398.0,
+        "current_sell_quantity": 69995.6,
         "buy_evidence": [
           {
             "side": "buy",
-            "price": 6.104,
+            "price": 6.09,
             "quantity": 1502.5,
             "band": "0.0-0.5%",
-            "distance_pct": 0.03275466754012086,
+            "distance_pct": 0.016417665407984467,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -1035,34 +971,34 @@
           },
           {
             "side": "buy",
-            "price": 6.101,
-            "quantity": 11583.7,
+            "price": 6.07,
+            "quantity": 11643.0,
             "band": "0.0-0.5%",
-            "distance_pct": 0.08188666885030943,
+            "distance_pct": 0.3447709735675572,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
-              "confidence": "STRONG",
+              "confidence": "MEDIUM",
               "sample_count": 50,
               "up": 13,
-              "down": 4,
-              "neutral": 33
+              "down": 5,
+              "neutral": 32
             }
           },
           {
             "side": "buy",
-            "price": 6.094,
-            "quantity": 814.0,
+            "price": 6.069,
+            "quantity": 4828.6,
             "band": "0.0-0.5%",
-            "distance_pct": 0.1965280052407397,
+            "distance_pct": 0.3611886389755416,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
-              "up": 7,
-              "down": 1,
-              "neutral": 42
+              "up": 9,
+              "down": 5,
+              "neutral": 36
             }
           },
           {
@@ -1070,55 +1006,87 @@
             "price": 6.05,
             "quantity": 2107.3,
             "band": "0.5-1.0%",
-            "distance_pct": 0.9171306911234859,
+            "distance_pct": 0.6731242817271444,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "LOW",
               "sample_count": 50,
-              "up": 16,
+              "up": 15,
               "down": 10,
-              "neutral": 24
+              "neutral": 25
             }
           },
           {
             "side": "buy",
             "price": 6.043,
             "quantity": 2055.0,
-            "band": "1.0-2.0%",
-            "distance_pct": 1.0317720275139162,
+            "band": "0.5-1.0%",
+            "distance_pct": 0.788047939582992,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
-              "confidence": "STRONG",
+              "confidence": "LOW",
               "sample_count": 50,
-              "up": 3,
-              "down": 3,
-              "neutral": 44
+              "up": 13,
+              "down": 11,
+              "neutral": 26
             }
           },
           {
             "side": "buy",
             "price": 6.04,
             "quantity": 1690.1,
-            "band": "1.0-2.0%",
-            "distance_pct": 1.0809040288241047,
+            "band": "0.5-1.0%",
+            "distance_pct": 0.8373009358069308,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
-              "confidence": "STRONG",
+              "confidence": "LOW",
               "sample_count": 50,
-              "up": 5,
-              "down": 3,
-              "neutral": 42
+              "up": 13,
+              "down": 12,
+              "neutral": 25
             }
           },
           {
             "side": "buy",
             "price": 6.031,
             "quantity": 982.3,
+            "band": "0.5-1.0%",
+            "distance_pct": 0.9850599244787474,
+            "historical_matches": 50,
+            "historical_impact": {
+              "direction": "NEUTRAL",
+              "confidence": "STRONG",
+              "sample_count": 50,
+              "up": 8,
+              "down": 6,
+              "neutral": 36
+            }
+          },
+          {
+            "side": "buy",
+            "price": 6.03,
+            "quantity": 847.5,
             "band": "1.0-2.0%",
-            "distance_pct": 1.2283000327546705,
+            "distance_pct": 1.0014775898867172,
+            "historical_matches": 50,
+            "historical_impact": {
+              "direction": "NEUTRAL",
+              "confidence": "STRONG",
+              "sample_count": 50,
+              "up": 2,
+              "down": 7,
+              "neutral": 41
+            }
+          },
+          {
+            "side": "buy",
+            "price": 6.022,
+            "quantity": 1093.0,
+            "band": "1.0-2.0%",
+            "distance_pct": 1.132818913150549,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -1131,49 +1099,17 @@
           },
           {
             "side": "buy",
-            "price": 6.03,
-            "quantity": 847.5,
-            "band": "1.0-2.0%",
-            "distance_pct": 1.2446773665247237,
-            "historical_matches": 50,
-            "historical_impact": {
-              "direction": "NEUTRAL",
-              "confidence": "STRONG",
-              "sample_count": 50,
-              "up": 3,
-              "down": 6,
-              "neutral": 41
-            }
-          },
-          {
-            "side": "buy",
-            "price": 6.022,
-            "quantity": 1093.0,
-            "band": "1.0-2.0%",
-            "distance_pct": 1.3756960366852216,
-            "historical_matches": 50,
-            "historical_impact": {
-              "direction": "NEUTRAL",
-              "confidence": "STRONG",
-              "sample_count": 50,
-              "up": 8,
-              "down": 5,
-              "neutral": 37
-            }
-          },
-          {
-            "side": "buy",
             "price": 6.02,
             "quantity": 1398.1,
             "band": "1.0-2.0%",
-            "distance_pct": 1.408450704225357,
+            "distance_pct": 1.165654243966518,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
-              "up": 2,
-              "down": 8,
+              "up": 1,
+              "down": 9,
               "neutral": 40
             }
           },
@@ -1182,14 +1118,14 @@
             "price": 6.014,
             "quantity": 2151.0,
             "band": "1.0-2.0%",
-            "distance_pct": 1.5067147068457196,
+            "distance_pct": 1.2641602364143811,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
-              "up": 5,
-              "down": 1,
+              "up": 2,
+              "down": 4,
               "neutral": 44
             }
           },
@@ -1198,15 +1134,15 @@
             "price": 6.01,
             "quantity": 166.3,
             "band": "1.0-2.0%",
-            "distance_pct": 1.5722240419259756,
+            "distance_pct": 1.3298308980463045,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
-              "up": 9,
+              "up": 8,
               "down": 7,
-              "neutral": 34
+              "neutral": 35
             }
           },
           {
@@ -1214,15 +1150,15 @@
             "price": 6.009,
             "quantity": 1881.0,
             "band": "1.0-2.0%",
-            "distance_pct": 1.588601375696029,
+            "distance_pct": 1.3462485634542742,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
-              "up": 5,
+              "up": 4,
               "down": 2,
-              "neutral": 43
+              "neutral": 44
             }
           },
           {
@@ -1230,14 +1166,14 @@
             "price": 6.008,
             "quantity": 1983.2,
             "band": "1.0-2.0%",
-            "distance_pct": 1.6049787094660966,
+            "distance_pct": 1.3626662288622586,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
-              "up": 4,
-              "down": 3,
+              "up": 3,
+              "down": 4,
               "neutral": 43
             }
           },
@@ -1246,23 +1182,23 @@
             "price": 6.0,
             "quantity": 1725.7,
             "band": "1.0-2.0%",
-            "distance_pct": 1.7359973796265946,
+            "distance_pct": 1.494007552126091,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
-              "up": 6,
-              "down": 2,
+              "up": 5,
+              "down": 3,
               "neutral": 42
             }
           },
           {
             "side": "buy",
-            "price": 5.976,
-            "quantity": 10669.2,
+            "price": 5.956,
+            "quantity": 10705.0,
             "band": "2.0-5.0%",
-            "distance_pct": 2.129053390108089,
+            "distance_pct": 2.2163848300771596,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -1275,18 +1211,18 @@
           },
           {
             "side": "buy",
-            "price": 5.959,
-            "quantity": 12475.0,
+            "price": 5.94,
+            "quantity": 12514.9,
             "band": "2.0-5.0%",
-            "distance_pct": 2.4074680641991524,
+            "distance_pct": 2.4790674766048233,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
-              "up": 6,
+              "up": 7,
               "down": 3,
-              "neutral": 41
+              "neutral": 40
             }
           },
           {
@@ -1294,14 +1230,14 @@
             "price": 5.93,
             "quantity": 1020.0,
             "band": "2.0-5.0%",
-            "distance_pct": 2.8824107435309556,
+            "distance_pct": 2.643244130684624,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "MEDIUM",
               "sample_count": 50,
-              "up": 11,
-              "down": 8,
+              "up": 9,
+              "down": 10,
               "neutral": 31
             }
           },
@@ -1310,15 +1246,15 @@
             "price": 5.925,
             "quantity": 1007.6,
             "band": "2.0-5.0%",
-            "distance_pct": 2.9642974123812653,
+            "distance_pct": 2.7253324577245173,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "MEDIUM",
               "sample_count": 50,
-              "up": 13,
-              "down": 9,
-              "neutral": 28
+              "up": 9,
+              "down": 11,
+              "neutral": 30
             }
           },
           {
@@ -1326,65 +1262,65 @@
             "price": 5.9,
             "quantity": 2095.9,
             "band": "2.0-5.0%",
-            "distance_pct": 3.3737307566328125,
+            "distance_pct": 3.1357740929239832,
             "historical_matches": 50,
             "historical_impact": {
-              "direction": "NEUTRAL",
+              "direction": "DOWN",
               "confidence": "LOW",
               "sample_count": 50,
               "up": 5,
-              "down": 22,
-              "neutral": 23
+              "down": 23,
+              "neutral": 22
             }
           }
         ],
         "sell_evidence": [
           {
             "side": "sell",
-            "price": 6.112,
-            "quantity": 11991.0,
+            "price": 6.095,
+            "quantity": 4727.0,
             "band": "0.0-0.5%",
-            "distance_pct": 0.09826400262037713,
+            "distance_pct": 0.06567066163190871,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
-              "confidence": "STRONG",
+              "confidence": "MEDIUM",
+              "sample_count": 50,
+              "up": 5,
+              "down": 15,
+              "neutral": 30
+            }
+          },
+          {
+            "side": "sell",
+            "price": 6.096,
+            "quantity": 2507.4,
+            "band": "0.0-0.5%",
+            "distance_pct": 0.08208832703989317,
+            "historical_matches": 50,
+            "historical_impact": {
+              "direction": "NEUTRAL",
+              "confidence": "MEDIUM",
               "sample_count": 50,
               "up": 8,
-              "down": 8,
-              "neutral": 34
+              "down": 12,
+              "neutral": 30
             }
           },
           {
             "side": "sell",
-            "price": 6.117,
-            "quantity": 3229.9,
+            "price": 6.1,
+            "quantity": 2089.8,
             "band": "0.0-0.5%",
-            "distance_pct": 0.18015067147068656,
+            "distance_pct": 0.14775898867180187,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
-              "up": 3,
-              "down": 13,
-              "neutral": 34
-            }
-          },
-          {
-            "side": "sell",
-            "price": 6.118,
-            "quantity": 2043.0,
-            "band": "0.0-0.5%",
-            "distance_pct": 0.19652800524075426,
-            "historical_matches": 50,
-            "historical_impact": {
-              "direction": "NEUTRAL",
-              "confidence": "STRONG",
-              "sample_count": 50,
-              "up": 3,
-              "down": 7,
-              "neutral": 40
+              "up": 5,
+              "down": 9,
+              "neutral": 36
             }
           },
           {
@@ -1392,7 +1328,7 @@
             "price": 6.199,
             "quantity": 4579.0,
             "band": "1.0-2.0%",
-            "distance_pct": 1.5230920406157873,
+            "distance_pct": 1.7731078640617248,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -1408,15 +1344,15 @@
             "price": 6.2,
             "quantity": 81.5,
             "band": "1.0-2.0%",
-            "distance_pct": 1.539469374385855,
+            "distance_pct": 1.7895255294697092,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "LOW",
               "sample_count": 50,
-              "up": 12,
+              "up": 11,
               "down": 13,
-              "neutral": 25
+              "neutral": 26
             }
           },
           {
@@ -1424,7 +1360,7 @@
             "price": 6.24,
             "quantity": 30754.0,
             "band": "2.0-5.0%",
-            "distance_pct": 2.194562725188345,
+            "distance_pct": 2.446232145788869,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -1440,14 +1376,14 @@
             "price": 6.268,
             "quantity": 12461.6,
             "band": "2.0-5.0%",
-            "distance_pct": 2.6531280707500806,
+            "distance_pct": 2.9059267772122737,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "LOW",
               "sample_count": 50,
-              "up": 12,
-              "down": 12,
+              "up": 11,
+              "down": 13,
               "neutral": 26
             }
           },
@@ -1456,15 +1392,15 @@
             "price": 6.269,
             "quantity": 971.5,
             "band": "2.0-5.0%",
-            "distance_pct": 2.6695054045201485,
+            "distance_pct": 2.922344442620258,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "UP",
               "confidence": "LOW",
               "sample_count": 50,
-              "up": 20,
+              "up": 19,
               "down": 12,
-              "neutral": 18
+              "neutral": 19
             }
           },
           {
@@ -1472,15 +1408,15 @@
             "price": 6.27,
             "quantity": 1100.0,
             "band": "2.0-5.0%",
-            "distance_pct": 2.6858827382902013,
+            "distance_pct": 2.938762108028228,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
-              "up": 9,
-              "down": 1,
-              "neutral": 40
+              "up": 7,
+              "down": 2,
+              "neutral": 41
             }
           },
           {
@@ -1488,14 +1424,14 @@
             "price": 6.299,
             "quantity": 1109.0,
             "band": "2.0-5.0%",
-            "distance_pct": 3.160825417622019,
+            "distance_pct": 3.414874404859632,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
-              "up": 6,
-              "down": 1,
+              "up": 4,
+              "down": 3,
               "neutral": 43
             }
           },
@@ -1504,7 +1440,7 @@
             "price": 6.3,
             "quantity": 8377.6,
             "band": "2.0-5.0%",
-            "distance_pct": 3.177202751392073,
+            "distance_pct": 3.431292070267602,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -1520,31 +1456,15 @@
             "price": 6.37,
             "quantity": 1237.2,
             "band": "2.0-5.0%",
-            "distance_pct": 4.323616115296434,
+            "distance_pct": 4.580528648826135,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "LOW",
               "sample_count": 50,
-              "up": 17,
-              "down": 11,
-              "neutral": 22
-            }
-          },
-          {
-            "side": "sell",
-            "price": 6.399,
-            "quantity": 1000.0,
-            "band": "2.0-5.0%",
-            "distance_pct": 4.798558794628237,
-            "historical_matches": 50,
-            "historical_impact": {
-              "direction": "NEUTRAL",
-              "confidence": "LOW",
-              "sample_count": 50,
-              "up": 18,
+              "up": 15,
               "down": 12,
-              "neutral": 20
+              "neutral": 23
             }
           }
         ]
@@ -1553,17 +1473,17 @@
       "decision_reason": "Local evidence prepared. P5 V2 and Historical Orderbook Impact are included as evidence layers. Final decision requires combined analysis of Paribu, Event/Lifecycle, P5 V2, Historical Orderbook Impact, Binance and OKX."
     },
     "ATH": {
-      "price": 0.2263,
-      "volume": 32522283.481,
+      "price": 0.2259,
+      "volume": 32307471.172,
       "orderbook_pressure": "supply_heavy",
       "last_event": "REVERSAL_DOWN",
-      "event_detected_at": "2026-09-05T22:30:53.585456+00:00",
-      "event_fetched_at": "2026-09-05T22:30:39Z",
-      "event_previous_state": "REVERSAL_UP",
+      "event_detected_at": "2026-09-05T22:45:47.322955+00:00",
+      "event_fetched_at": "2026-09-05T22:45:33Z",
+      "event_previous_state": "REVERSAL_DOWN",
       "event_current_state": "REVERSAL_DOWN",
       "event_reason": "Önceki güçlenme sonrasında fiyat yönü aşağı dönüyor.",
       "lifecycle_state": "REVERSAL_DOWN",
-      "lifecycle_updated_at": "2026-09-05T22:30:53.585456+00:00",
+      "lifecycle_updated_at": "2026-09-05T22:45:47.322955+00:00",
       "last_evidence_event": "SUPPLY_PRESSURE",
       "last_evidence_at": "2026-09-05T20:00:55.829372+00:00",
       "p5_v2": {
@@ -1571,7 +1491,7 @@
         "state": "SUPPLY_BIAS",
         "actionable_transition": false,
         "imbalance": {
-          "value": -0.5256614215605411,
+          "value": -0.4188751122314569,
           "state": "SUPPLY",
           "threshold": 0.3
         },
@@ -1587,10 +1507,10 @@
           "resolution": false
         },
         "ask_wall": {
-          "price": null,
-          "materiality": null,
-          "class": null,
-          "distance": null,
+          "price": 0.2266,
+          "materiality": 0.7792266161422347,
+          "class": "MATERIAL",
+          "distance": 0.00421005982716587,
           "persistence": 0,
           "persistence_status": "OBSERVATION",
           "migration": false,
@@ -1615,32 +1535,48 @@
         "historical_buy_impact": {
           "direction": "NEUTRAL",
           "confidence": "STRONG",
-          "sample_count": 200,
-          "up": 26,
-          "down": 21,
-          "neutral": 153
+          "sample_count": 250,
+          "up": 33,
+          "down": 24,
+          "neutral": 193
         },
         "historical_sell_impact": {
           "direction": "NEUTRAL",
           "confidence": "STRONG",
           "sample_count": 350,
-          "up": 46,
-          "down": 32,
-          "neutral": 272
+          "up": 30,
+          "down": 25,
+          "neutral": 295
         },
-        "historical_sample_count": 10822,
-        "lifecycle_count": 10822,
-        "current_relevant_buy_levels": 4,
+        "historical_sample_count": 10833,
+        "lifecycle_count": 10833,
+        "current_relevant_buy_levels": 5,
         "current_relevant_sell_levels": 7,
-        "current_buy_quantity": 554433.262,
-        "current_sell_quantity": 2054037.221,
+        "current_buy_quantity": 593935.4789999999,
+        "current_sell_quantity": 1844574.74,
         "buy_evidence": [
           {
             "side": "buy",
-            "price": 0.2259,
-            "quantity": 97536.075,
+            "price": 0.2253,
+            "quantity": 36566.926,
             "band": "0.0-0.5%",
-            "distance_pct": 0.1767565178966025,
+            "distance_pct": 0.26560424966799,
+            "historical_matches": 50,
+            "historical_impact": {
+              "direction": "NEUTRAL",
+              "confidence": "STRONG",
+              "sample_count": 50,
+              "up": 9,
+              "down": 3,
+              "neutral": 38
+            }
+          },
+          {
+            "side": "buy",
+            "price": 0.2252,
+            "quantity": 85676.755,
+            "band": "0.0-0.5%",
+            "distance_pct": 0.30987162461265094,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -1653,18 +1589,18 @@
           },
           {
             "side": "buy",
-            "price": 0.2258,
-            "quantity": 63966.083,
+            "price": 0.2251,
+            "quantity": 78760.694,
             "band": "0.0-0.5%",
-            "distance_pct": 0.22094564737074698,
+            "distance_pct": 0.35413899955732414,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
-              "up": 6,
+              "up": 4,
               "down": 2,
-              "neutral": 42
+              "neutral": 44
             }
           },
           {
@@ -1672,7 +1608,7 @@
             "price": 0.2178,
             "quantity": 346545.899,
             "band": "2.0-5.0%",
-            "distance_pct": 3.756076005302699,
+            "distance_pct": 3.5856573705179264,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -1688,7 +1624,7 @@
             "price": 0.2155,
             "quantity": 46385.205,
             "band": "2.0-5.0%",
-            "distance_pct": 4.772425983208133,
+            "distance_pct": 4.603806994245238,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -1703,42 +1639,26 @@
         "sell_evidence": [
           {
             "side": "sell",
-            "price": 0.2267,
-            "quantity": 253237.0,
+            "price": 0.226,
+            "quantity": 38230.0,
             "band": "0.0-0.5%",
-            "distance_pct": 0.1767565178966025,
+            "distance_pct": 0.04426737494467319,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
               "confidence": "STRONG",
               "sample_count": 50,
-              "up": 5,
-              "down": 5,
-              "neutral": 40
+              "up": 3,
+              "down": 2,
+              "neutral": 45
             }
           },
           {
             "side": "sell",
-            "price": 0.2268,
-            "quantity": 87760.047,
-            "band": "0.0-0.5%",
-            "distance_pct": 0.22094564737074698,
-            "historical_matches": 50,
-            "historical_impact": {
-              "direction": "NEUTRAL",
-              "confidence": "STRONG",
-              "sample_count": 50,
-              "up": 5,
-              "down": 3,
-              "neutral": 42
-            }
-          },
-          {
-            "side": "sell",
-            "price": 0.2274,
+            "price": 0.2266,
             "quantity": 380024.837,
             "band": "0.0-0.5%",
-            "distance_pct": 0.4860804242156385,
+            "distance_pct": 0.3098716246126632,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -1751,18 +1671,34 @@
           },
           {
             "side": "sell",
-            "price": 0.2275,
-            "quantity": 63966.083,
-            "band": "0.5-1.0%",
-            "distance_pct": 0.5302695536897952,
+            "price": 0.2267,
+            "quantity": 69510.602,
+            "band": "0.0-0.5%",
+            "distance_pct": 0.3541389995573364,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
-              "confidence": "LOW",
+              "confidence": "STRONG",
               "sample_count": 50,
-              "up": 14,
-              "down": 9,
-              "neutral": 27
+              "up": 0,
+              "down": 5,
+              "neutral": 45
+            }
+          },
+          {
+            "side": "sell",
+            "price": 0.2268,
+            "quantity": 87760.047,
+            "band": "0.0-0.5%",
+            "distance_pct": 0.39840637450199734,
+            "historical_matches": 50,
+            "historical_impact": {
+              "direction": "NEUTRAL",
+              "confidence": "STRONG",
+              "sample_count": 50,
+              "up": 5,
+              "down": 3,
+              "neutral": 42
             }
           },
           {
@@ -1770,7 +1706,7 @@
             "price": 0.2278,
             "quantity": 25624.321,
             "band": "0.5-1.0%",
-            "distance_pct": 0.662836942112241,
+            "distance_pct": 0.8410801239486555,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -1786,7 +1722,7 @@
             "price": 0.2323,
             "quantity": 43068.783,
             "band": "2.0-5.0%",
-            "distance_pct": 2.651347768448964,
+            "distance_pct": 2.8331119964586176,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
@@ -1802,7 +1738,7 @@
             "price": 0.2328,
             "quantity": 1200356.15,
             "band": "2.0-5.0%",
-            "distance_pct": 2.872293415819711,
+            "distance_pct": 3.0544488711819464,
             "historical_matches": 50,
             "historical_impact": {
               "direction": "NEUTRAL",
