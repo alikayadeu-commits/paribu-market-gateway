@@ -2,12 +2,12 @@
   "model": "P5",
   "version": "V2",
   "status": "FROZEN",
-  "generated_at": "2026-10-10T16:16:02.569730+00:00",
-  "snapshot_at": "2026-10-10T16:15:46Z",
+  "generated_at": "2026-10-10T16:31:03.555478+00:00",
+  "snapshot_at": "2026-10-10T16:30:48Z",
   "data_health": {
-    "snapshot_age_seconds": 15.81,
-    "orderbook_history_rows": 4524,
-    "historical_rows_used": 4523,
+    "snapshot_age_seconds": 14.97,
+    "orderbook_history_rows": 4525,
+    "historical_rows_used": 4524,
     "healthy": true
   },
   "spec": {
@@ -29,7 +29,7 @@
       "state": "DEMAND_BIAS",
       "actionable_transition": false,
       "imbalance": {
-        "value": 0.33173185844146796,
+        "value": 0.6529088594932888,
         "state": "DEMAND",
         "threshold": 0.3
       },
@@ -49,11 +49,11 @@
         "materiality": null,
         "class": null,
         "distance": null,
-        "persistence": 2,
-        "persistence_status": "CANDIDATE",
+        "persistence": 0,
+        "persistence_status": "OBSERVATION",
         "migration": false,
         "displacement": null,
-        "resolution": true
+        "resolution": false
       },
       "prediction_horizon": {
         "snapshots": 3,
@@ -63,19 +63,19 @@
         "bid_migration": false,
         "ask_migration": false,
         "bid_resolution": false,
-        "ask_resolution": true,
+        "ask_resolution": false,
         "bid_persistence_confirmed": false,
         "ask_persistence_confirmed": false
       },
       "data": {
-        "historical_snapshots": 4523
+        "historical_snapshots": 4524
       }
     },
     "FET": {
       "state": "DEMAND_BIAS",
       "actionable_transition": false,
       "imbalance": {
-        "value": 0.4545530190717723,
+        "value": 0.32740498788610145,
         "state": "DEMAND",
         "threshold": 0.3
       },
@@ -114,60 +114,14 @@
         "ask_persistence_confirmed": false
       },
       "data": {
-        "historical_snapshots": 4523
+        "historical_snapshots": 4524
       }
     },
     "KITE": {
-      "state": "DEMAND_BIAS",
+      "state": "WEAKENING",
       "actionable_transition": false,
       "imbalance": {
-        "value": 0.6736701541042054,
-        "state": "DEMAND",
-        "threshold": 0.3
-      },
-      "bid_wall": {
-        "price": 6.361,
-        "materiality": 0.8490662627725608,
-        "class": "DOMINANT",
-        "distance": 0.001099246231155867,
-        "persistence": 0,
-        "persistence_status": "OBSERVATION",
-        "migration": false,
-        "displacement": null,
-        "resolution": false
-      },
-      "ask_wall": {
-        "price": null,
-        "materiality": null,
-        "class": null,
-        "distance": null,
-        "persistence": 0,
-        "persistence_status": "OBSERVATION",
-        "migration": false,
-        "displacement": null,
-        "resolution": false
-      },
-      "prediction_horizon": {
-        "snapshots": 3,
-        "minutes": 45
-      },
-      "evidence": {
-        "bid_migration": false,
-        "ask_migration": false,
-        "bid_resolution": false,
-        "ask_resolution": false,
-        "bid_persistence_confirmed": false,
-        "ask_persistence_confirmed": false
-      },
-      "data": {
-        "historical_snapshots": 4523
-      }
-    },
-    "ATH": {
-      "state": "NEUTRAL",
-      "actionable_transition": false,
-      "imbalance": {
-        "value": 0.1974148670370222,
+        "value": 0.19183699381011288,
         "state": "NEUTRAL",
         "threshold": 0.3
       },
@@ -176,21 +130,21 @@
         "materiality": null,
         "class": null,
         "distance": null,
+        "persistence": 1,
+        "persistence_status": "OBSERVATION",
+        "migration": false,
+        "displacement": null,
+        "resolution": true
+      },
+      "ask_wall": {
+        "price": 6.391,
+        "materiality": 0.6707938154493303,
+        "class": "MATERIAL",
+        "distance": 0.0015671524839366536,
         "persistence": 0,
         "persistence_status": "OBSERVATION",
         "migration": false,
         "displacement": null,
-        "resolution": false
-      },
-      "ask_wall": {
-        "price": 0.3307,
-        "materiality": 0.72234357271717,
-        "class": "MATERIAL",
-        "distance": 0.0015142337976981977,
-        "persistence": 1,
-        "persistence_status": "OBSERVATION",
-        "migration": false,
-        "displacement": 0.0009079903147698758,
         "resolution": false
       },
       "prediction_horizon": {
@@ -200,13 +154,59 @@
       "evidence": {
         "bid_migration": false,
         "ask_migration": false,
+        "bid_resolution": true,
+        "ask_resolution": false,
+        "bid_persistence_confirmed": false,
+        "ask_persistence_confirmed": false
+      },
+      "data": {
+        "historical_snapshots": 4524
+      }
+    },
+    "ATH": {
+      "state": "SUPPLY_BIAS",
+      "actionable_transition": false,
+      "imbalance": {
+        "value": -0.6742877918758263,
+        "state": "SUPPLY",
+        "threshold": 0.3
+      },
+      "bid_wall": {
+        "price": 0.3285,
+        "materiality": 0.6877199273231924,
+        "class": "MATERIAL",
+        "distance": 0.0015197568389057764,
+        "persistence": 0,
+        "persistence_status": "OBSERVATION",
+        "migration": false,
+        "displacement": null,
+        "resolution": false
+      },
+      "ask_wall": {
+        "price": 0.3294,
+        "materiality": 0.8161412422725025,
+        "class": "DOMINANT",
+        "distance": 0.0012158054711246548,
+        "persistence": 2,
+        "persistence_status": "CANDIDATE",
+        "migration": true,
+        "displacement": 0.003931055337163495,
+        "resolution": false
+      },
+      "prediction_horizon": {
+        "snapshots": 3,
+        "minutes": 45
+      },
+      "evidence": {
+        "bid_migration": false,
+        "ask_migration": true,
         "bid_resolution": false,
         "ask_resolution": false,
         "bid_persistence_confirmed": false,
         "ask_persistence_confirmed": false
       },
       "data": {
-        "historical_snapshots": 4516
+        "historical_snapshots": 4517
       }
     }
   }
